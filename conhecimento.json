@@ -1,0 +1,14 @@
+[
+  {
+    "id": "tratamento_limpeza_pele",
+    "texto": "Tratamento: Limpeza de Pele Profunda. Descrição: Remove impurezas, cravos e células mortas, deixando a pele renovada. Duração: 60 minutos. Preço: 50€. Ideal para fazer 1 vez por mês."
+  },
+  {
+    "id": "tratamento_botox",
+    "texto": "Tratamento: Aplicação de Botox. Descrição: Previne e reduz rugas de expressão na testa e ao redor dos olhos. Procedimento rápido e quase indolor. Duração: 30 minutos. Preço: 150€ por zona. Necessário avaliação prévia."
+  },
+  {
+    "id": "politica_clinica",
+    "texto": "A Aura Estética funciona de Segunda a Sexta, das 09:00 às 19:00. O endereço é Rua da Beleza, 123, Lisboa. Para agendar, o cliente deve fornecer Nome Completo, Data/Hora desejada e o Serviço."
+  }
+]
