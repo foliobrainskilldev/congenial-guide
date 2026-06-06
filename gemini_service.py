@@ -2,8 +2,11 @@
 import os
 import json
 import logging
+import traceback  # <--- CORREÇÃO: Importação adicionada para capturar logs detalhados
 from typing import Dict, Any, Tuple
+
 import chromadb
+from chromadb.config import Settings  # <--- CORREÇÃO: Importação para desativar telemetria
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from google import genai
 from google.genai import types
@@ -19,17 +22,32 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
         embeddings = []
         for doc in input:
-            response = client.models.embed_content(
-                model='text-embedding-004',
-                contents=doc
-            )
-            embeddings.append(response.embeddings[0].values)
+            try:
+                # CORREÇÃO: Tenta o modelo novo, se der 404 (Not Found), cai no fallback para o antigo
+                try:
+                    response = client.models.embed_content(
+                        model='text-embedding-004',
+                        contents=doc
+                    )
+                except Exception as e:
+                    logger.warning(f"Fallback no Embedding: {e}. A tentar models/embedding-001...")
+                    response = client.models.embed_content(
+                        model='models/embedding-001',
+                        contents=doc
+                    )
+                embeddings.append(response.embeddings[0].values)
+            except Exception as e:
+                logger.error(f"Erro Crítico ao gerar embedding: {e}")
+                # Adiciona um vetor vazio caso falhe totalmente para não quebrar a app
+                embeddings.append([0.0] * 768) 
         return embeddings
 
 class GeminiService:
     def __init__(self):
         self.model_name = 'gemini-2.5-flash'
-        self.chroma_client = chromadb.Client()
+        
+        # CORREÇÃO: Desativa a telemetria do ChromaDB para evitar os erros do "ClientStartEvent"
+        self.chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
         self.collection_name = "aura_conhecimento"
         self.embedding_fn = GeminiEmbeddingFunction()
         
@@ -66,18 +84,22 @@ class GeminiService:
         if self.collection.count() == 0:
             return ""
         
-        resultados = self.collection.query(
-            query_texts=[query],
-            n_results=2
-        )
-        documentos_recuperados = resultados.get("documents", [[]])[0]
-        return "\n".join(documentos_recuperados)
+        try:
+            resultados = self.collection.query(
+                query_texts=[query],
+                n_results=2
+            )
+            documentos_recuperados = resultados.get("documents", [[]])[0]
+            return "\n".join(documentos_recuperados)
+        except Exception as e:
+            logger.error(f"Erro ao buscar no ChromaDB: {e}")
+            return ""
 
     def processar_mensagem(self, query: str, historico: str) -> Tuple[str, Dict[str, Any]]:
         """Gera a resposta usando o Gemini e verifica extração de agendamento."""
         contexto_rag = self._obter_contexto_rag(query)
         
-        # Tool Schema simplificado usando dicts para evitar "OBJECT" crash do SDK
+        # Tool Schema
         tool_agendar = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
@@ -107,7 +129,7 @@ class GeminiService:
 
         prompt_sistema = (
             "És a assistente virtual da Clínica de Estética Avançada 'Aura Estética'. "
-            "Sejas educada, profissional e concisa.\n"
+            "Sê educada, profissional e concisa.\n"
             f"Histórico da conversa:\n{historico}\n\n"
             f"Informações relevantes da clínica (RAG):\n{contexto_rag}\n\n"
             f"Mensagem do utilizador: {query}"
@@ -126,25 +148,35 @@ class GeminiService:
             )
 
             texto_resposta = ""
+            chamou_funcao = False
             
-            # Verifica Function Calling
-            if response.function_calls:
-                for func_call in response.function_calls:
-                    if func_call.name == "agendar_tratamento":
-                        # Extrai de forma segura para dict
-                        args = func_call.args if isinstance(func_call.args, dict) else dict(func_call.args)
-                        
-                        dados_agendamento = {
-                            "nome_cliente": args.get("nome_cliente", "Cliente"),
-                            "data_hora": args.get("data_hora", "Horário a definir"),
-                            "servico_estetico_desejado": args.get("servico_estetico_desejado", "Serviço")
-                        }
-                        texto_resposta = (f"Perfeito, {dados_agendamento['nome_cliente']}! "
-                                          f"O teu pedido para {dados_agendamento['servico_estetico_desejado']} "
-                                          f"para as {dados_agendamento['data_hora']} foi recebido. "
-                                          f"Vamos analisar e confirmamos o agendamento em breve.")
-            else:
-                texto_resposta = response.text
+            # CORREÇÃO: Nova forma segura de aceder a function calls no SDK google-genai
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if getattr(part, 'function_call', None):
+                        func_call = part.function_call
+                        if func_call.name == "agendar_tratamento":
+                            chamou_funcao = True
+                            
+                            args = func_call.args if isinstance(func_call.args, dict) else dict(func_call.args)
+                            
+                            dados_agendamento = {
+                                "nome_cliente": args.get("nome_cliente", "Cliente"),
+                                "data_hora": args.get("data_hora", "Horário a definir"),
+                                "servico_estetico_desejado": args.get("servico_estetico_desejado", "Serviço")
+                            }
+                            texto_resposta = (f"Perfeito, {dados_agendamento['nome_cliente']}! "
+                                              f"O teu pedido para {dados_agendamento['servico_estetico_desejado']} "
+                                              f"para as {dados_agendamento['data_hora']} foi recebido. "
+                                              f"Vamos analisar e confirmamos o agendamento em breve.")
+                            break # Encontrou a função, para o loop
+
+            # Se a IA não ativou a função, captura o texto padrão
+            if not chamou_funcao:
+                try:
+                    texto_resposta = response.text if response.text else "Não consegui formular uma resposta, pode reformular?"
+                except ValueError:
+                    texto_resposta = "Anotado! Em que mais posso ajudar?"
 
             return texto_resposta, dados_agendamento
 
