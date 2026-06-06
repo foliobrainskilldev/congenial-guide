@@ -11,7 +11,9 @@ import redis.asyncio as redis
 from bson import ObjectId
 
 from database import DatabaseManager, get_agendamentos_collection, get_logs_collection
-from gemini_service import gemini_service
+
+# --- ALTERAÇÃO AQUI: Importar o novo AI Service em vez do Gemini ---
+from ai_service import ai_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -98,7 +100,6 @@ async def process_whatsapp_message(request: Request):
         if msg_obj.get("type") == "text":
             msg_text = msg_obj.get("text", {}).get("body", "")
         elif msg_obj.get("type") == "interactive":
-            # Extrai o texto do botão que o cliente clicou
             msg_text = msg_obj.get("interactive", {}).get("button_reply", {}).get("title", "")
             
         if not msg_text:
@@ -109,7 +110,6 @@ async def process_whatsapp_message(request: Request):
         handover_key = f"handover:{sender_phone}"
         is_handover = await redis_client.get(handover_key)
         if is_handover:
-            # Bot está calado, grava apenas no log para o Admin ler
             await get_logs_collection().insert_one({
                 "telefone": sender_phone,
                 "mensagem_cliente": f"[MODO HUMANO] {msg_text}",
@@ -130,17 +130,15 @@ async def process_whatsapp_message(request: Request):
         cursor_cliente = agendamentos_collection.find({"telefone_cliente": sender_phone}).sort("criado_em", -1).limit(2)
         info_cliente = "\n".join([f"- {ag['servico']} ({ag['data_hora']}) Status: {ag['status']}" async for ag in cursor_cliente]) or "Nenhum."
 
-        # Pega a agenda ocupada dos próximos 15 dias para o bot não marcar nada em cima
         hoje = datetime.utcnow()
-        limite = hoje + timedelta(days=15)
         cursor_agenda = agendamentos_collection.find({
             "status": {"$ne": "Cancelado"}, 
-            "criado_em": {"$gte": hoje - timedelta(days=30)} # Simplificação para apanhar os ativos
+            "criado_em": {"$gte": hoje - timedelta(days=30)} 
         }).limit(20)
         agenda_ocupada = "\n".join([f"- Ocupado: {ag['data_hora']}" async for ag in cursor_agenda]) or "Agenda totalmente livre."
         
-        # 4. ENVIAR PARA A IA
-        texto_resposta, acao_bot = gemini_service.processar_mensagem(msg_text, historico, info_cliente, agenda_ocupada)
+        # 4. ENVIAR PARA A IA (Agora usando Groq)
+        texto_resposta, acao_bot = ai_service.processar_mensagem(msg_text, historico, info_cliente, agenda_ocupada)
         
         # 5. EXECUTAR AÇÕES AUTÓNOMAS DA IA
         tipo_acao = acao_bot.get("tipo_acao")
@@ -157,14 +155,12 @@ async def process_whatsapp_message(request: Request):
             })
         
         elif tipo_acao == "cancelar":
-            # Cancela o último agendamento Pendente ou Confirmado
             await agendamentos_collection.update_one(
                 {"telefone_cliente": sender_phone, "status": {"$ne": "Cancelado"}},
                 {"$set": {"status": "Cancelado"}}
             )
             
         elif tipo_acao == "chamar_humano":
-            # Pausa o bot por 12 horas (43200 segundos) para este número
             await redis_client.set(handover_key, "true", ex=43200)
             texto_resposta = "Compreendo perfeitamente. Vou transferir-te para a nossa equipa humana. Eles vão assumir esta conversa em breve!"
 
@@ -179,7 +175,7 @@ async def process_whatsapp_message(request: Request):
             "timestamp": datetime.utcnow()
         })
         
-        # 7. ENVIAR RESPOSTA PARA O WHATSAPP (BOTÕES OU TEXTO NORMAL)
+        # 7. ENVIAR RESPOSTA PARA O WHATSAPP
         botoes = dados.get("botoes", [])
         if tipo_acao == "enviar_botoes" and len(botoes) > 0:
             await enviar_botoes_whatsapp(sender_phone, texto_resposta, botoes)
@@ -212,17 +208,16 @@ async def enviar_mensagem_whatsapp(to_phone: str, message: str):
         await client.post(url, headers=headers, json=payload)
 
 async def enviar_botoes_whatsapp(to_phone: str, texto: str, botoes: list):
-    """Envia uma mensagem interativa com até 3 botões."""
     url = f"https://graph.facebook.com/{API_VERSION}/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     
     botoes_formatados = []
-    for i, btn_text in enumerate(botoes[:3]): # Máximo 3 botões permitidos pela Meta
+    for i, btn_text in enumerate(botoes[:3]): 
         botoes_formatados.append({
             "type": "reply",
             "reply": {
                 "id": f"btn_{i}",
-                "title": btn_text[:20] # A Meta exige máximo de 20 caracteres por botão
+                "title": btn_text[:20] 
             }
         })
 
@@ -240,5 +235,4 @@ async def enviar_botoes_whatsapp(to_phone: str, texto: str, botoes: list):
     async with httpx.AsyncClient() as client:
         res = await client.post(url, headers=headers, json=payload)
         if res.status_code != 200:
-            # Fallback caso a API bloqueie os botões: envia como texto normal
             await enviar_mensagem_whatsapp(to_phone, f"{texto}\n\nOpções:\n- " + "\n- ".join(botoes))
