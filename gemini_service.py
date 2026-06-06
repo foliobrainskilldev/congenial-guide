@@ -5,10 +5,10 @@ import logging
 import traceback
 from typing import Dict, Any, Tuple
 
-# --- CORREÇÃO 1: DESATIVAR A TELEMETRIA DO CHROMADB ---
-# Evita o erro no console: "Failed to send telemetry event CollectionQueryEvent"
+# --- CORREÇÃO: SILENCIAR O ERRO FALSO DO CHROMADB (POSTHOG) ---
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["CHROMA_TELEMETRY_DISABLED"] = "1"
+logging.getLogger('chromadb.telemetry.product.posthog').setLevel(logging.CRITICAL)
 
 import chromadb
 from chromadb.config import Settings
@@ -22,9 +22,9 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 class GeminiService:
     def __init__(self):
-        # --- CORREÇÃO 2: MUDAR O MODELO PARA TER MAIOR LIMITE ---
-        # gemini-1.5-flash tem um limite gratuito muito maior (1500 pedidos por dia).
-        self.model_name = 'gemini-1.5-flash'
+        # --- CORREÇÃO: MUDAR O MODELO PARA O ESTÁVEL E DE ALTO LIMITE ---
+        # gemini-2.0-flash é o modelo principal com 1500 requisições diárias gratuitas
+        self.model_name = 'gemini-2.0-flash'
         
         self.chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
         
@@ -161,7 +161,6 @@ class GeminiService:
             logger.error(f"Erro no Gemini: {e}")
             logger.error(traceback.format_exc())
             
-            # --- CORREÇÃO 3: RESPOSTA AMIGÁVEL PARA LIMITE ATINGIDO ---
             if "429" in erro_str or "RESOURCE_EXHAUSTED" in erro_str:
                 acao_bot["texto_mensagem"] = "Desculpe, o nosso sistema está a receber muitos pedidos neste momento e atingiu o limite. ⏳ Por favor, aguarde cerca de um minuto e tente novamente."
             else:
