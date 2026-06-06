@@ -3,8 +3,9 @@ import os
 import httpx
 import logging
 import json
+import traceback
 from datetime import datetime
-from fastapi import FastAPI, Request, Response, HTTPException, Depends
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import redis.asyncio as redis
@@ -21,12 +22,12 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "*") # Se *, aceita tudo. Se URL, aceita só do Frontend.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
 
 # Instância FastAPI
 app = FastAPI(title="Aura Estética API", version="1.0.0")
 
-# Configuração CORS (Requisito Arquitetural Desacoplado)
+# Configuração CORS
 origins = ["*"] if FRONTEND_URL == "*" else [FRONTEND_URL]
 app.add_middleware(
     CORSMiddleware,
@@ -36,7 +37,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cliente Redis Assíncrono para estado/histórico
+# Cliente Redis Assíncrono
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 @app.on_event("startup")
@@ -60,8 +61,6 @@ class AgendamentoUpdate(BaseModel):
 
 @app.post("/api/auth/login")
 async def login(credentials: LoginRequest):
-    # Simulação simples de autenticação exigida pelo requisito. 
-    # Em produção, usa hashing (bcrypt) e JWT real.
     ADMIN_USER = os.getenv("ADMIN_USER", "admin")
     ADMIN_PASS = os.getenv("ADMIN_PASS", "123456")
     
@@ -118,31 +117,40 @@ async def verify_webhook(request: Request):
 
 @app.post("/webhook")
 async def process_whatsapp_message(request: Request):
-    """Recebe mensagens, processa RAG+Gemini e responde."""
-    body = await request.json()
-    
+    """Recebe mensagens, processa RAG+Gemini e responde de forma segura."""
     try:
-        # Extração defensiva do payload do WhatsApp
-        entry = body.get("entry", [])[0]
-        changes = entry.get("changes", [])[0]
-        value = changes.get("value", {})
+        body = await request.json()
+        
+        # Extração SUPER defensiva para evitar o erro "OBJECT" de Indexação
+        entries = body.get("entry", [])
+        if not entries:
+            return {"status": "ok"}
+            
+        changes = entries[0].get("changes", [])
+        if not changes:
+            return {"status": "ok"}
+            
+        value = changes[0].get("value", {})
         messages = value.get("messages", [])
         
+        # Se for um evento de leitura/entrega de mensagem (sem conteúdo de texto)
         if not messages:
-            return {"status": "ok", "msg": "Sem mensagens para processar."}
+            return {"status": "ok", "msg": "Evento ignorado"}
             
         msg_obj = messages[0]
         sender_phone = msg_obj.get("from")
-        msg_text = msg_obj.get("text", {}).get("body", "")
         
+        # Só processamos texto. Imagens/Áudios disparam uma mensagem de aviso.
+        msg_text = msg_obj.get("text", {}).get("body", "")
         if not msg_text:
+            await enviar_mensagem_whatsapp(sender_phone, "Ainda não consigo ouvir áudios ou ver imagens. Por favor, escreve a tua mensagem em texto!")
             return {"status": "ok"}
 
         # 1. Recupera histórico do Redis
         redis_key = f"chat_history:{sender_phone}"
         historico = await redis_client.get(redis_key) or ""
         
-        # 2. IA gera a resposta e verifica se houve "Function Call"
+        # 2. IA gera a resposta
         resposta_ia, dados_agendamento = gemini_service.processar_mensagem(msg_text, historico)
         
         # 3. Atualiza o histórico no Redis (Expira em 1 hora)
@@ -161,14 +169,14 @@ async def process_whatsapp_message(request: Request):
             "timestamp": datetime.utcnow()
         })
         
-        # 6. Se Function Calling capturou um agendamento, salva no MongoDB
+        # 6. Se capturou um agendamento, salva no MongoDB
         if dados_agendamento:
             agendamentos_collection = get_agendamentos_collection()
             await agendamentos_collection.insert_one({
                 "telefone_cliente": sender_phone,
-                "nome_cliente": dados_agendamento["nome_cliente"],
-                "data_hora": dados_agendamento["data_hora"],
-                "servico": dados_agendamento["servico_estetico_desejado"],
+                "nome_cliente": dados_agendamento.get("nome_cliente", "Desconhecido"),
+                "data_hora": dados_agendamento.get("data_hora", "A Combinar"),
+                "servico": dados_agendamento.get("servico_estetico_desejado", "Serviço Geral"),
                 "status": "Pendente",
                 "criado_em": datetime.utcnow()
             })
@@ -177,7 +185,10 @@ async def process_whatsapp_message(request: Request):
         
     except Exception as e:
         logger.error(f"Erro no processamento do webhook: {e}")
-        return {"status": "error"}
+        # A magia está aqui: Imprime a linha EXATA do erro no Log do Render
+        logger.error(traceback.format_exc()) 
+        # Importante: Retorna sempre 200 OK para o WhatsApp não bloquear a app
+        return {"status": "ok"} 
 
 async def enviar_mensagem_whatsapp(to_phone: str, message: str):
     """Envia resposta usando httpx assíncrono."""

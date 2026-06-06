@@ -10,7 +10,7 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Configuração da API do Google Gemini (Novo SDK)
+# Configuração da API do Google Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -29,12 +29,10 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
 class GeminiService:
     def __init__(self):
         self.model_name = 'gemini-2.5-flash'
-        # Inicializa o ChromaDB em memória (ou persistente)
         self.chroma_client = chromadb.Client()
         self.collection_name = "aura_conhecimento"
         self.embedding_fn = GeminiEmbeddingFunction()
         
-        # Cria ou obtém a coleção
         self.collection = self.chroma_client.get_or_create_collection(
             name=self.collection_name, 
             embedding_function=self.embedding_fn
@@ -44,8 +42,7 @@ class GeminiService:
     def _carregar_base_conhecimento(self):
         """Lê o conhecimento.json e indexa no ChromaDB (RAG)."""
         try:
-            # Estrutura esperada do conhecimento.json: [{"id": "1", "texto": "Tratamento X..."}]
-            caminho_arquivo = os.path.join(os.path.dirname(__els__file__), "conhecimento.json") if '__file__' in globals() else "conhecimento.json"
+            caminho_arquivo = os.path.join(os.path.dirname(__file__), "conhecimento.json") if '__file__' in globals() else "conhecimento.json"
             if not os.path.exists(caminho_arquivo):
                 logger.warning("Ficheiro conhecimento.json não encontrado. RAG vazio.")
                 return
@@ -59,7 +56,6 @@ class GeminiService:
             ids = [item["id"] for item in dados]
             documentos = [item["texto"] for item in dados]
             
-            # Adiciona ao ChromaDB
             self.collection.add(documents=documentos, ids=ids)
             logger.info("✅ Base de conhecimento RAG carregada no ChromaDB.")
         except Exception as e:
@@ -78,28 +74,33 @@ class GeminiService:
         return "\n".join(documentos_recuperados)
 
     def processar_mensagem(self, query: str, historico: str) -> Tuple[str, Dict[str, Any]]:
-        """
-        Gera a resposta usando o Gemini 2.5 Flash, passando o contexto do RAG 
-        e disponibilizando a ferramenta (Function Calling) de agendamento.
-        Retorna (texto_da_resposta, dados_agendamento_extraidos_se_houver)
-        """
+        """Gera a resposta usando o Gemini e verifica extração de agendamento."""
         contexto_rag = self._obter_contexto_rag(query)
         
-        # Define a Ferramenta (Function Calling) para agendamento
+        # Tool Schema simplificado usando dicts para evitar "OBJECT" crash do SDK
         tool_agendar = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
                     name="agendar_tratamento",
                     description="Agenda um tratamento estético na clínica capturando os dados essenciais do cliente.",
-                    parameters=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "nome_cliente": types.Schema(type=types.Type.STRING, description="Nome completo do cliente."),
-                            "data_hora": types.Schema(type=types.Type.STRING, description="Data e hora solicitada (ex: 2024-05-20 15:00)."),
-                            "servico_estetico_desejado": types.Schema(type=types.Type.STRING, description="O tratamento que o cliente deseja realizar (ex: Botox, Limpeza de Pele).")
+                    parameters={
+                        "type": "OBJECT",
+                        "properties": {
+                            "nome_cliente": {
+                                "type": "STRING", 
+                                "description": "Nome completo do cliente."
+                            },
+                            "data_hora": {
+                                "type": "STRING", 
+                                "description": "Data e hora solicitada (ex: 2024-05-20 15:00)."
+                            },
+                            "servico_estetico_desejado": {
+                                "type": "STRING", 
+                                "description": "O tratamento que o cliente deseja realizar (ex: Botox)."
+                            }
                         },
-                        required=["nome_cliente", "data_hora", "servico_estetico_desejado"]
-                    )
+                        "required": ["nome_cliente", "data_hora", "servico_estetico_desejado"]
+                    }
                 )
             ]
         )
@@ -126,28 +127,31 @@ class GeminiService:
 
             texto_resposta = ""
             
-            # Verifica se o Gemini decidiu chamar a função
+            # Verifica Function Calling
             if response.function_calls:
                 for func_call in response.function_calls:
                     if func_call.name == "agendar_tratamento":
-                        # Extrai os argumentos devolvidos pela IA
-                        args = func_call.args
+                        # Extrai de forma segura para dict
+                        args = func_call.args if isinstance(func_call.args, dict) else dict(func_call.args)
+                        
                         dados_agendamento = {
-                            "nome_cliente": args.get("nome_cliente", ""),
-                            "data_hora": args.get("data_hora", ""),
-                            "servico_estetico_desejado": args.get("servico_estetico_desejado", "")
+                            "nome_cliente": args.get("nome_cliente", "Cliente"),
+                            "data_hora": args.get("data_hora", "Horário a definir"),
+                            "servico_estetico_desejado": args.get("servico_estetico_desejado", "Serviço")
                         }
                         texto_resposta = (f"Perfeito, {dados_agendamento['nome_cliente']}! "
                                           f"O teu pedido para {dados_agendamento['servico_estetico_desejado']} "
-                                          f"para {dados_agendamento['data_hora']} foi registado. A clínica irá confirmar em breve.")
+                                          f"para as {dados_agendamento['data_hora']} foi recebido. "
+                                          f"Vamos analisar e confirmamos o agendamento em breve.")
             else:
                 texto_resposta = response.text
 
             return texto_resposta, dados_agendamento
 
         except Exception as e:
-            logger.error(f"Erro no Gemini: {e}")
-            return "Peço desculpa, mas estou a enfrentar problemas técnicos neste momento. Tente novamente mais tarde.", None
+            logger.error(f"Erro no processamento do Gemini: {e}")
+            logger.error(traceback.format_exc())
+            return "Aguarde um momento, estou a processar a sua informação...", None
 
-# Instância Singleton do Serviço
+# Instância Singleton
 gemini_service = GeminiService()
