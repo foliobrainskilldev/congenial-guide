@@ -1,8 +1,14 @@
+# backend/gemini_service.py
 import os
 import json
 import logging
 import traceback
 from typing import Dict, Any, Tuple
+
+# --- CORREÇÃO 1: DESATIVAR A TELEMETRIA DO CHROMADB ---
+# Evita o erro no console: "Failed to send telemetry event CollectionQueryEvent"
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+os.environ["CHROMA_TELEMETRY_DISABLED"] = "1"
 
 import chromadb
 from chromadb.config import Settings
@@ -16,9 +22,10 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 class GeminiService:
     def __init__(self):
-        self.model_name = 'gemini-2.5-flash'
+        # --- CORREÇÃO 2: MUDAR O MODELO PARA TER MAIOR LIMITE ---
+        # gemini-1.5-flash tem um limite gratuito muito maior (1500 pedidos por dia).
+        self.model_name = 'gemini-1.5-flash'
         
-        # DEFINIR A CONFIGURAÇÃO PARA CALAR O ERRO DE TELEMETRIA
         self.chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
         
         self.collection_name = "aura_conhecimento"
@@ -42,7 +49,6 @@ class GeminiService:
             logger.error(f"Erro ao carregar RAG: {e}")
 
     def _obter_contexto_rag(self, query: str) -> str:
-        # Envolvido em try/except para evitar crashes do ChromaDB na base principal
         try:
             if self.collection.count() == 0:
                 return ""
@@ -54,8 +60,6 @@ class GeminiService:
     def processar_mensagem(self, query: str, historico: str, info_cliente: str, agenda_ocupada: str) -> Tuple[str, Dict[str, Any]]:
         contexto_rag = self._obter_contexto_rag(query)
         
-        # CORREÇÃO CRUCIAL 1: Usar types.Schema em vez de Dicionários Crús.
-        # Versões recentes de google-genai são estritas na validação de schemas.
         tools_clinica = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
@@ -113,14 +117,12 @@ class GeminiService:
                 )
             )
 
-            # Iteramos pelas partes de forma segura para intercetar o function_call
             if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
                     if getattr(part, 'function_call', None):
                         func_call = part.function_call
                         if func_call.name == "acao_sistema":
                             
-                            # CORREÇÃO CRUCIAL 2: Prevenir falha na conversão dos parâmetros
                             args = func_call.args or {}
                             if not isinstance(args, dict):
                                 try:
@@ -139,8 +141,6 @@ class GeminiService:
                             }
                             return acao_bot["texto_mensagem"], acao_bot
 
-            # CORREÇÃO CRUCIAL 3: Aceder a texto de forma segura
-            # Evita o "ValueError" causado pelo `response.text` se o modelo não responder texto.
             texto_normal = ""
             if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
@@ -157,9 +157,16 @@ class GeminiService:
             return texto_normal, acao_bot
 
         except Exception as e:
+            erro_str = str(e)
             logger.error(f"Erro no Gemini: {e}")
             logger.error(traceback.format_exc())
-            acao_bot["texto_mensagem"] = "Aguarde um momento, estou a processar a sua informação..."
+            
+            # --- CORREÇÃO 3: RESPOSTA AMIGÁVEL PARA LIMITE ATINGIDO ---
+            if "429" in erro_str or "RESOURCE_EXHAUSTED" in erro_str:
+                acao_bot["texto_mensagem"] = "Desculpe, o nosso sistema está a receber muitos pedidos neste momento e atingiu o limite. ⏳ Por favor, aguarde cerca de um minuto e tente novamente."
+            else:
+                acao_bot["texto_mensagem"] = "Aguarde um momento, ocorreu uma pequena falha ao processar a sua informação."
+                
             return acao_bot["texto_mensagem"], acao_bot
 
 gemini_service = GeminiService()
