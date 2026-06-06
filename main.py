@@ -104,7 +104,6 @@ async def listar_logs():
 
 @app.get("/webhook")
 async def verify_webhook(request: Request):
-    """Validação do Webhook (GET) exigida pela Meta."""
     hub_mode = request.query_params.get("hub.mode")
     hub_challenge = request.query_params.get("hub.challenge")
     hub_verify_token = request.query_params.get("hub.verify_token")
@@ -116,7 +115,6 @@ async def verify_webhook(request: Request):
 
 @app.post("/webhook")
 async def process_whatsapp_message(request: Request):
-    """Recebe mensagens, processa RAG+Gemini e responde de forma segura."""
     try:
         body = await request.json()
         
@@ -136,22 +134,25 @@ async def process_whatsapp_message(request: Request):
             
         msg_obj = messages[0]
         sender_phone = msg_obj.get("from")
-        message_id = msg_obj.get("id") # <-- Captura o ID da mensagem recebida
+        message_id = msg_obj.get("id") 
         
         msg_text = msg_obj.get("text", {}).get("body", "")
         if not msg_text:
             await enviar_mensagem_whatsapp(sender_phone, "Ainda não consigo ouvir áudios ou ver imagens. Por favor, escreve a tua mensagem em texto!")
             return {"status": "ok"}
 
-        # --- NOVO: MARCA COMO LIDA IMEDIATAMENTE (PONTINHOS AZUIS) ---
+        # 1. MARCA COMO LIDA IMEDIATAMENTE (PONTINHOS AZUIS)
         if message_id:
             await marcar_como_lida(message_id)
 
-        # 1. Recupera histórico do Redis
+        # 2. TENTA ATIVAR O ESTADO "A ESCREVER..."
+        await mostrar_a_escrever(sender_phone)
+
+        # 3. Recupera histórico do Redis
         redis_key = f"chat_history:{sender_phone}"
         historico = await redis_client.get(redis_key) or ""
         
-        # 2. BUSCA OS AGENDAMENTOS REAIS NA BASE DE DADOS MONGODB PARA INJETAR NO PROMPT
+        # 4. Busca os agendamentos reais
         agendamentos_collection = get_agendamentos_collection()
         cursor = agendamentos_collection.find({"telefone_cliente": sender_phone}).sort("criado_em", -1).limit(3)
         agendamentos_db = []
@@ -160,23 +161,23 @@ async def process_whatsapp_message(request: Request):
             
         texto_agendamentos = ""
         if agendamentos_db:
-            texto_agendamentos = "Agendamentos atuais deste cliente na base de dados (MongoDB):\n"
+            texto_agendamentos = "Agendamentos atuais deste cliente na base de dados:\n"
             for ag in agendamentos_db:
                 texto_agendamentos += f"- Serviço: {ag.get('servico')}, Data: {ag.get('data_hora')}, Status: {ag.get('status')}\n"
         else:
             texto_agendamentos = "O cliente ainda não tem agendamentos registados no sistema."
         
-        # 3. IA gera a resposta (Agora com contexto da BD!)
+        # 5. IA gera a resposta
         resposta_ia, dados_agendamento = gemini_service.processar_mensagem(msg_text, historico, texto_agendamentos)
         
-        # 4. Atualiza o histórico no Redis (Expira em 1 hora)
+        # 6. Atualiza o histórico
         novo_historico = f"{historico}\nCliente: {msg_text}\nIA: {resposta_ia}"
         await redis_client.set(redis_key, novo_historico[-1000:], ex=3600) 
         
-        # 5. Envia resposta de volta via Meta Graph API
+        # 7. Envia a resposta final
         await enviar_mensagem_whatsapp(sender_phone, resposta_ia)
         
-        # 6. Salva Log de Interação no MongoDB
+        # 8. Logs e BD
         logs_collection = get_logs_collection()
         await logs_collection.insert_one({
             "telefone": sender_phone,
@@ -185,7 +186,6 @@ async def process_whatsapp_message(request: Request):
             "timestamp": datetime.utcnow()
         })
         
-        # 7. Se a IA capturou um NOVO agendamento, salva no MongoDB
         if dados_agendamento:
             await agendamentos_collection.insert_one({
                 "telefone_cliente": sender_phone,
@@ -203,7 +203,8 @@ async def process_whatsapp_message(request: Request):
         logger.error(traceback.format_exc()) 
         return {"status": "ok"} 
 
-# --- NOVA FUNÇÃO PARA OS PONTINHOS AZUIS ---
+# --- FUNÇÕES META API ---
+
 async def marcar_como_lida(message_id: str):
     """Avisa a Meta que a mensagem foi lida, gerando os pontinhos azuis no cliente."""
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
@@ -222,8 +223,31 @@ async def marcar_como_lida(message_id: str):
     except Exception as e:
         logger.error(f"Erro ao marcar mensagem como lida: {e}")
 
+async def mostrar_a_escrever(to_phone: str):
+    """Testa a funcionalidade 'A escrever...' baseada na sugestão."""
+    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    # Aqui colocamos exatamente o parâmetro sugerido, adaptado com o "to" (destinatário) obrigatório da Meta
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_phone,
+        "typing_indicator": {
+            "type": "text"
+        }
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload)
+            # Se a Meta não aceitar isto, devolve um erro. Escrevemos no log para descobrir!
+            if response.status_code != 200:
+                logger.warning(f"Resposta da Meta sobre o 'A escrever': {response.text}")
+    except Exception as e:
+        logger.error(f"Erro ao tentar mostrar 'A escrever': {e}")
+
 async def enviar_mensagem_whatsapp(to_phone: str, message: str):
-    """Envia resposta usando httpx assíncrono."""
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
