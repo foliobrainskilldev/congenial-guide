@@ -1,59 +1,33 @@
 # backend/gemini_service.py
 import os
+# Desativa completamente a telemetria do ChromaDB para evitar os erros "capture()"
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
 import json
 import logging
-import traceback  # <--- CORREÇÃO: Importação adicionada para capturar logs detalhados
+import traceback
 from typing import Dict, Any, Tuple
-
 import chromadb
-from chromadb.config import Settings  # <--- CORREÇÃO: Importação para desativar telemetria
-from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from google import genai
 from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Configuração da API do Google Gemini
+# Configuração da API do Google Gemini (Apenas para geração de texto agora)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
-
-class GeminiEmbeddingFunction(EmbeddingFunction):
-    """Função customizada para usar o Google Embeddings no ChromaDB."""
-    def __call__(self, input: Documents) -> Embeddings:
-        embeddings = []
-        for doc in input:
-            try:
-                # CORREÇÃO: Tenta o modelo novo, se der 404 (Not Found), cai no fallback para o antigo
-                try:
-                    response = client.models.embed_content(
-                        model='text-embedding-004',
-                        contents=doc
-                    )
-                except Exception as e:
-                    logger.warning(f"Fallback no Embedding: {e}. A tentar models/embedding-001...")
-                    response = client.models.embed_content(
-                        model='models/embedding-001',
-                        contents=doc
-                    )
-                embeddings.append(response.embeddings[0].values)
-            except Exception as e:
-                logger.error(f"Erro Crítico ao gerar embedding: {e}")
-                # Adiciona um vetor vazio caso falhe totalmente para não quebrar a app
-                embeddings.append([0.0] * 768) 
-        return embeddings
 
 class GeminiService:
     def __init__(self):
         self.model_name = 'gemini-2.5-flash'
         
-        # CORREÇÃO: Desativa a telemetria do ChromaDB para evitar os erros do "ClientStartEvent"
-        self.chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
+        self.chroma_client = chromadb.Client()
         self.collection_name = "aura_conhecimento"
-        self.embedding_fn = GeminiEmbeddingFunction()
         
+        # Ao não passar embedding_function, o ChromaDB usará o seu modelo local padrão.
+        # Isso resolve DEFINITIVAMENTE os erros 404 do Google Embeddings.
         self.collection = self.chroma_client.get_or_create_collection(
-            name=self.collection_name, 
-            embedding_function=self.embedding_fn
+            name=self.collection_name
         )
         self._carregar_base_conhecimento()
 
@@ -75,7 +49,7 @@ class GeminiService:
             documentos = [item["texto"] for item in dados]
             
             self.collection.add(documents=documentos, ids=ids)
-            logger.info("✅ Base de conhecimento RAG carregada no ChromaDB.")
+            logger.info("✅ Base de conhecimento RAG carregada no Chroma local.")
         except Exception as e:
             logger.error(f"Erro ao carregar RAG: {e}")
 
@@ -99,7 +73,6 @@ class GeminiService:
         """Gera a resposta usando o Gemini e verifica extração de agendamento."""
         contexto_rag = self._obter_contexto_rag(query)
         
-        # Tool Schema
         tool_agendar = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
@@ -114,11 +87,11 @@ class GeminiService:
                             },
                             "data_hora": {
                                 "type": "STRING", 
-                                "description": "Data e hora solicitada (ex: 2024-05-20 15:00)."
+                                "description": "Data e hora solicitada."
                             },
                             "servico_estetico_desejado": {
                                 "type": "STRING", 
-                                "description": "O tratamento que o cliente deseja realizar (ex: Botox)."
+                                "description": "O tratamento que o cliente deseja realizar."
                             }
                         },
                         "required": ["nome_cliente", "data_hora", "servico_estetico_desejado"]
@@ -150,14 +123,12 @@ class GeminiService:
             texto_resposta = ""
             chamou_funcao = False
             
-            # CORREÇÃO: Nova forma segura de aceder a function calls no SDK google-genai
             if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
                     if getattr(part, 'function_call', None):
                         func_call = part.function_call
                         if func_call.name == "agendar_tratamento":
                             chamou_funcao = True
-                            
                             args = func_call.args if isinstance(func_call.args, dict) else dict(func_call.args)
                             
                             dados_agendamento = {
@@ -169,9 +140,8 @@ class GeminiService:
                                               f"O teu pedido para {dados_agendamento['servico_estetico_desejado']} "
                                               f"para as {dados_agendamento['data_hora']} foi recebido. "
                                               f"Vamos analisar e confirmamos o agendamento em breve.")
-                            break # Encontrou a função, para o loop
+                            break
 
-            # Se a IA não ativou a função, captura o texto padrão
             if not chamou_funcao:
                 try:
                     texto_resposta = response.text if response.text else "Não consegui formular uma resposta, pode reformular?"
@@ -185,5 +155,4 @@ class GeminiService:
             logger.error(traceback.format_exc())
             return "Aguarde um momento, estou a processar a sua informação...", None
 
-# Instância Singleton
 gemini_service = GeminiService()
