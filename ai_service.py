@@ -29,8 +29,8 @@ client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 class AIService:
     def __init__(self):
-        # Llama 3.1 70B é o modelo mais estável e inteligente da Groq para interpretar ferramentas/ações
-        self.model_name = 'llama-3.1-70b-versatile'
+        # --- CORREÇÃO: Atualizado para o Llama 3.3 (a versão nova suportada pela Groq) ---
+        self.model_name = 'llama-3.3-70b-versatile'
         
         self.chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
         self.collection_name = "aura_conhecimento"
@@ -127,7 +127,7 @@ class AIService:
                 tools=tools_clinica,
                 tool_choice="auto",
                 temperature=0.5,
-                max_tokens=1024 # CORREÇÃO CRUCIAL AQUI
+                max_tokens=1024
             )
 
             response_message = response.choices[0].message
@@ -159,7 +159,6 @@ class AIService:
             return texto_normal, acao_bot
 
         except Exception as e:
-            # RADARES PARA O TEU TERMINAL
             print(f"\n❌ ERRO FATAL NO GROQ: {e}", flush=True)
             print(traceback.format_exc(), flush=True)
             
