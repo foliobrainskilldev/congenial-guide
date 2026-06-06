@@ -20,30 +20,22 @@ class GeminiService:
         self.model_name = 'gemini-2.5-flash'
         self.chroma_client = chromadb.Client()
         self.collection_name = "aura_conhecimento"
-        
-        self.collection = self.chroma_client.get_or_create_collection(
-            name=self.collection_name
-        )
+        self.collection = self.chroma_client.get_or_create_collection(name=self.collection_name)
         self._carregar_base_conhecimento()
 
     def _carregar_base_conhecimento(self):
         try:
             caminho_arquivo = os.path.join(os.path.dirname(__file__), "conhecimento.json") if '__file__' in globals() else "conhecimento.json"
             if not os.path.exists(caminho_arquivo):
-                logger.warning("Ficheiro conhecimento.json não encontrado. RAG vazio.")
                 return
-
             with open(caminho_arquivo, "r", encoding="utf-8") as f:
                 dados = json.load(f)
-            
             if not dados:
                 return
-
             ids = [item["id"] for item in dados]
             documentos = [item["texto"] for item in dados]
-            
             self.collection.add(documents=documentos, ids=ids)
-            logger.info("✅ Base de conhecimento RAG carregada no Chroma local.")
+            logger.info("✅ Base de conhecimento RAG carregada.")
         except Exception as e:
             logger.error(f"Erro ao carregar RAG: {e}")
 
@@ -51,95 +43,101 @@ class GeminiService:
         if self.collection.count() == 0:
             return ""
         try:
-            resultados = self.collection.query(
-                query_texts=[query],
-                n_results=2
-            )
-            documentos_recuperados = resultados.get("documents", [[]])[0]
-            return "\n".join(documentos_recuperados)
-        except Exception as e:
-            logger.error(f"Erro ao buscar no ChromaDB: {e}")
+            resultados = self.collection.query(query_texts=[query], n_results=2)
+            return "\n".join(resultados.get("documents", [[]])[0])
+        except Exception:
             return ""
 
-    # NOVO: Recebe 'info_agendamentos' da base de dados
-    def processar_mensagem(self, query: str, historico: str, info_agendamentos: str = "") -> Tuple[str, Dict[str, Any]]:
+    def processar_mensagem(self, query: str, historico: str, info_cliente: str, agenda_ocupada: str) -> Tuple[str, Dict[str, Any]]:
         contexto_rag = self._obter_contexto_rag(query)
         
-        tool_agendar = types.Tool(
+        # --- DEFINIÇÃO DAS NOVAS FERRAMENTAS (TOOLS) ---
+        tools_clinica = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
-                    name="agendar_tratamento",
-                    description="Agenda um novo tratamento estético.",
+                    name="acao_sistema",
+                    description="Executa ações vitais no sistema (agendar, cancelar, reagendar, chamar humano ou enviar botões).",
                     parameters={
                         "type": "OBJECT",
                         "properties": {
-                            "nome_cliente": {"type": "STRING", "description": "Nome completo do cliente."},
-                            "data_hora": {"type": "STRING", "description": "Data e hora solicitada."},
-                            "servico_estetico_desejado": {"type": "STRING", "description": "O tratamento desejado."}
+                            "tipo_acao": {
+                                "type": "STRING", 
+                                "description": "Escolhe: 'agendar', 'cancelar', 'reagendar', 'chamar_humano', 'enviar_botoes' ou 'nenhuma'."
+                            },
+                            "nome_cliente": {"type": "STRING", "description": "Nome do cliente (se aplicável)."},
+                            "data_hora": {"type": "STRING", "description": "Data/Hora desejada (ex: 15/06 às 14:00)."},
+                            "servico": {"type": "STRING", "description": "Serviço estético desejado."},
+                            "texto_mensagem": {"type": "STRING", "description": "Texto que o bot deve dizer ao cliente."},
+                            "botao_1": {"type": "STRING", "description": "Texto do botão 1 (máx 20 letras)."},
+                            "botao_2": {"type": "STRING", "description": "Texto do botão 2 (máx 20 letras)."},
+                            "botao_3": {"type": "STRING", "description": "Texto do botão 3 (máx 20 letras)."}
                         },
-                        "required": ["nome_cliente", "data_hora", "servico_estetico_desejado"]
+                        "required": ["tipo_acao", "texto_mensagem"]
                     }
                 )
             ]
         )
 
-        # NOVO: O prompt agora injeta o status real da base de dados
         prompt_sistema = (
-            "És a assistente virtual da Clínica de Estética Avançada 'Aura Estética'. "
-            "Sê educada, profissional e concisa.\n"
-            f"Histórico da conversa:\n{historico}\n\n"
-            f"Informações da clínica (RAG):\n{contexto_rag}\n\n"
-            f"ESTADO DOS AGENDAMENTOS DO CLIENTE NO SISTEMA:\n{info_agendamentos}\n"
-            "ATENÇÃO: Se o utilizador perguntar sobre o seu agendamento, confere o estado acima. "
-            "Se o estado for 'Confirmado', diz-lhe que está Confirmado. Se for 'Pendente', diz que ainda está a ser analisado.\n\n"
-            f"Mensagem do utilizador: {query}"
+            "És a rececionista virtual avançada da 'Aura Estética'. "
+            "REGRAS DE OURO:\n"
+            "1. ADAPTA-TE AO HUMOR: Analisa se o cliente está feliz, apressado ou irritado. Responde com a emoção correspondente. Não sejas robótica. Usa linguagem natural e variada.\n"
+            "2. CALENDÁRIO: NUNCA agendes para um horário que esteja na lista de 'Agenda Ocupada'. Se pedirem, sugere outro horário livre próximo.\n"
+            "3. BOTÕES DO WHATSAPP: Se precisares que o cliente confirme algo ou escolha entre 2 opções, usa a 'tipo_acao': 'enviar_botoes' e preenche o botao_1 e botao_2.\n"
+            "4. PASSAR A HUMANO: Se o cliente estiver chateado, confuso, ou pedir para falar com uma pessoa, usa a 'tipo_acao': 'chamar_humano'.\n"
+            "5. CANCELAR/REAGENDAR: Se o cliente quiser cancelar ou mudar a hora, usa 'cancelar' ou 'reagendar'.\n\n"
+            f"HISTÓRICO DO CHAT:\n{historico}\n\n"
+            f"BASE DE DADOS RAG:\n{contexto_rag}\n\n"
+            f"AGENDAMENTOS ATUAIS DESTE CLIENTE:\n{info_cliente}\n\n"
+            f"AGENDA OCUPADA DA CLÍNICA (NÃO MARCAR AQUI):\n{agenda_ocupada}\n\n"
+            f"MENSAGEM DO CLIENTE: {query}"
         )
 
-        dados_agendamento = None
+        acao_bot = {
+            "tipo_acao": "nenhuma",
+            "texto_mensagem": "",
+            "dados": {}
+        }
 
         try:
             response = client.models.generate_content(
                 model=self.model_name,
                 contents=prompt_sistema,
                 config=types.GenerateContentConfig(
-                    tools=[tool_agendar],
-                    temperature=0.3
+                    tools=[tools_clinica],
+                    temperature=0.5 # Aumentado ligeiramente para ser mais criativo/natural
                 )
             )
 
-            texto_resposta = ""
-            chamou_funcao = False
-            
+            # Processar se a IA chamou uma ferramenta
             if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
                     if getattr(part, 'function_call', None):
                         func_call = part.function_call
-                        if func_call.name == "agendar_tratamento":
-                            chamou_funcao = True
+                        if func_call.name == "acao_sistema":
                             args = func_call.args if isinstance(func_call.args, dict) else dict(func_call.args)
                             
-                            dados_agendamento = {
-                                "nome_cliente": args.get("nome_cliente", "Cliente"),
-                                "data_hora": args.get("data_hora", "Horário a definir"),
-                                "servico_estetico_desejado": args.get("servico_estetico_desejado", "Serviço")
+                            acao_bot["tipo_acao"] = args.get("tipo_acao", "nenhuma")
+                            acao_bot["texto_mensagem"] = args.get("texto_mensagem", "Anotado!")
+                            
+                            # Guarda dados extra dependendo da ação
+                            acao_bot["dados"] = {
+                                "nome_cliente": args.get("nome_cliente", ""),
+                                "data_hora": args.get("data_hora", ""),
+                                "servico": args.get("servico", ""),
+                                "botoes": [b for b in [args.get("botao_1"), args.get("botao_2"), args.get("botao_3")] if b]
                             }
-                            texto_resposta = (f"Perfeito, {dados_agendamento['nome_cliente']}! "
-                                              f"O teu pedido para {dados_agendamento['servico_estetico_desejado']} "
-                                              f"para as {dados_agendamento['data_hora']} foi recebido e está como Pendente. "
-                                              f"A nossa equipa vai validar e confirmar brevemente.")
-                            break
+                            return acao_bot["texto_mensagem"], acao_bot
 
-            if not chamou_funcao:
-                try:
-                    texto_resposta = response.text if response.text else "Não consegui formular uma resposta, pode reformular?"
-                except ValueError:
-                    texto_resposta = "Anotado! Em que mais posso ajudar?"
-
-            return texto_resposta, dados_agendamento
+            # Se não ativou a ferramenta, pega o texto normal
+            texto_normal = response.text if response.text else "Não entendi, podes reformular?"
+            acao_bot["texto_mensagem"] = texto_normal
+            return texto_normal, acao_bot
 
         except Exception as e:
             logger.error(f"Erro no Gemini: {e}")
             logger.error(traceback.format_exc())
-            return "Aguarde um momento, estou a processar a sua informação...", None
+            acao_bot["texto_mensagem"] = "Aguarde um momento, estou a processar a sua informação..."
+            return acao_bot["texto_mensagem"], acao_bot
 
 gemini_service = GeminiService()

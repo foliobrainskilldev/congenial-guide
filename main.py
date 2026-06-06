@@ -3,7 +3,7 @@ import os
 import httpx
 import logging
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -13,34 +13,21 @@ from bson import ObjectId
 from database import DatabaseManager, get_agendamentos_collection, get_logs_collection
 from gemini_service import gemini_service
 
-# Configuração de Logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Variáveis de Ambiente
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
-
-# ATUALIZAÇÃO IMPORTANTE: Usar versão recente da API para suportar o 'typing_indicator'
 API_VERSION = "v21.0" 
 
-# Instância FastAPI
-app = FastAPI(title="Aura Estética API", version="1.0.0")
+app = FastAPI(title="Aura Estética API", version="2.0.0")
 
-# Configuração CORS
 origins = ["*"] if FRONTEND_URL == "*" else [FRONTEND_URL]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Cliente Redis Assíncrono
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 @app.on_event("startup")
@@ -52,7 +39,6 @@ async def shutdown_db_client():
     await DatabaseManager.close_db()
     await redis_client.close()
 
-# --- MODELOS PYDANTIC ---
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -60,187 +46,199 @@ class LoginRequest(BaseModel):
 class AgendamentoUpdate(BaseModel):
     status: str
 
-# --- ENDPOINTS REST PARA O FRONTEND ---
-
+# --- ENDPOINTS REST ---
 @app.post("/api/auth/login")
 async def login(credentials: LoginRequest):
-    ADMIN_USER = os.getenv("ADMIN_USER", "admin")
-    ADMIN_PASS = os.getenv("ADMIN_PASS", "123456")
-    
-    if credentials.username == ADMIN_USER and credentials.password == ADMIN_PASS:
-        return {"token": "simulated-jwt-token-7b89a", "status": "success"}
+    if credentials.username == os.getenv("ADMIN_USER", "admin") and credentials.password == os.getenv("ADMIN_PASS", "123456"):
+        return {"token": "simulated-jwt", "status": "success"}
     raise HTTPException(status_code=401, detail="Credenciais inválidas")
 
 @app.get("/api/agendamentos")
 async def listar_agendamentos():
-    agendamentos_collection = get_agendamentos_collection()
-    cursor = agendamentos_collection.find().sort("criado_em", -1)
-    agendamentos = []
-    async for doc in cursor:
-        doc["_id"] = str(doc["_id"])
-        agendamentos.append(doc)
+    cursor = get_agendamentos_collection().find().sort("criado_em", -1)
+    agendamentos = [ {**doc, "_id": str(doc["_id"])} async for doc in cursor ]
     return {"agendamentos": agendamentos}
 
 @app.patch("/api/agendamentos/{id_agendamento}")
 async def atualizar_agendamento(id_agendamento: str, update_data: AgendamentoUpdate):
-    agendamentos_collection = get_agendamentos_collection()
-    resultado = await agendamentos_collection.update_one(
-        {"_id": ObjectId(id_agendamento)}, 
-        {"$set": {"status": update_data.status}}
-    )
+    resultado = await get_agendamentos_collection().update_one({"_id": ObjectId(id_agendamento)}, {"$set": {"status": update_data.status}})
     if resultado.modified_count == 1:
-        return {"mensagem": "Status atualizado com sucesso"}
-    raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+        return {"mensagem": "Atualizado"}
+    raise HTTPException(status_code=404)
 
 @app.get("/api/logs")
 async def listar_logs():
-    logs_collection = get_logs_collection()
-    cursor = logs_collection.find().sort("timestamp", -1).limit(50)
-    logs = []
-    async for doc in cursor:
-        doc["_id"] = str(doc["_id"])
-        logs.append(doc)
+    cursor = get_logs_collection().find().sort("timestamp", -1).limit(50)
+    logs = [ {**doc, "_id": str(doc["_id"])} async for doc in cursor ]
     return {"logs": logs}
 
-
-# --- WEBHOOKS META WHATSAPP CLOUD API ---
-
+# --- WEBHOOK WHATSAPP ---
 @app.get("/webhook")
 async def verify_webhook(request: Request):
-    hub_mode = request.query_params.get("hub.mode")
-    hub_challenge = request.query_params.get("hub.challenge")
-    hub_verify_token = request.query_params.get("hub.verify_token")
-
-    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        logger.info("Webhook da Meta verificado com sucesso!")
-        return Response(content=hub_challenge, media_type="text/plain")
-    raise HTTPException(status_code=403, detail="Falha na verificação")
+    if request.query_params.get("hub.mode") == "subscribe" and request.query_params.get("hub.verify_token") == VERIFY_TOKEN:
+        return Response(content=request.query_params.get("hub.challenge"), media_type="text/plain")
+    raise HTTPException(status_code=403)
 
 @app.post("/webhook")
 async def process_whatsapp_message(request: Request):
     try:
         body = await request.json()
-        
         entries = body.get("entry", [])
-        if not entries:
-            return {"status": "ok"}
+        if not entries or not entries[0].get("changes"): return {"status": "ok"}
             
-        changes = entries[0].get("changes", [])
-        if not changes:
-            return {"status": "ok"}
-            
-        value = changes[0].get("value", {})
-        messages = value.get("messages", [])
-        
-        if not messages:
-            return {"status": "ok", "msg": "Evento ignorado"}
+        messages = entries[0]["changes"][0].get("value", {}).get("messages", [])
+        if not messages: return {"status": "ok"}
             
         msg_obj = messages[0]
         sender_phone = msg_obj.get("from")
         message_id = msg_obj.get("id") 
-        
-        msg_text = msg_obj.get("text", {}).get("body", "")
+
+        # 1. IDENTIFICAR SE É TEXTO OU UM CLIQUE NUM BOTÃO INTERATIVO
+        msg_text = ""
+        if msg_obj.get("type") == "text":
+            msg_text = msg_obj.get("text", {}).get("body", "")
+        elif msg_obj.get("type") == "interactive":
+            # Extrai o texto do botão que o cliente clicou
+            msg_text = msg_obj.get("interactive", {}).get("button_reply", {}).get("title", "")
+            
         if not msg_text:
-            await enviar_mensagem_whatsapp(sender_phone, "Ainda não consigo ouvir áudios ou ver imagens. Por favor, escreve a tua mensagem em texto!")
+            await enviar_mensagem_whatsapp(sender_phone, "Desculpa, por enquanto só consigo entender texto ou cliques nos botões!")
             return {"status": "ok"}
 
-        # 1. MARCA COMO LIDA (Pontinhos Azuis) E MOSTRA "A ESCREVER..."
+        # 2. VERIFICAR HANDOVER (PAUSA PARA ATENDIMENTO HUMANO)
+        handover_key = f"handover:{sender_phone}"
+        is_handover = await redis_client.get(handover_key)
+        if is_handover:
+            # Bot está calado, grava apenas no log para o Admin ler
+            await get_logs_collection().insert_one({
+                "telefone": sender_phone,
+                "mensagem_cliente": f"[MODO HUMANO] {msg_text}",
+                "resposta_ia": "(Bot Pausado)",
+                "timestamp": datetime.utcnow()
+            })
+            return {"status": "ok"}
+
         if message_id:
             await marcar_como_lida_e_a_escrever(message_id)
 
-        # 2. Recupera histórico do Redis
         redis_key = f"chat_history:{sender_phone}"
         historico = await redis_client.get(redis_key) or ""
         
-        # 3. Busca os agendamentos reais
         agendamentos_collection = get_agendamentos_collection()
-        cursor = agendamentos_collection.find({"telefone_cliente": sender_phone}).sort("criado_em", -1).limit(3)
-        agendamentos_db = []
-        async for doc in cursor:
-            agendamentos_db.append(doc)
-            
-        texto_agendamentos = ""
-        if agendamentos_db:
-            texto_agendamentos = "Agendamentos atuais deste cliente na base de dados:\n"
-            for ag in agendamentos_db:
-                texto_agendamentos += f"- Serviço: {ag.get('servico')}, Data: {ag.get('data_hora')}, Status: {ag.get('status')}\n"
-        else:
-            texto_agendamentos = "O cliente ainda não tem agendamentos registados no sistema."
         
-        # 4. IA gera a resposta (Isto demora uns segundos, o que é perfeito para o cliente ver o "a escrever")
-        resposta_ia, dados_agendamento = gemini_service.processar_mensagem(msg_text, historico, texto_agendamentos)
+        # 3. EXTRAIR INFORMAÇÃO DO CLIENTE E AGENDA GERAL (CALENDÁRIO)
+        cursor_cliente = agendamentos_collection.find({"telefone_cliente": sender_phone}).sort("criado_em", -1).limit(2)
+        info_cliente = "\n".join([f"- {ag['servico']} ({ag['data_hora']}) Status: {ag['status']}" async for ag in cursor_cliente]) or "Nenhum."
+
+        # Pega a agenda ocupada dos próximos 15 dias para o bot não marcar nada em cima
+        hoje = datetime.utcnow()
+        limite = hoje + timedelta(days=15)
+        cursor_agenda = agendamentos_collection.find({
+            "status": {"$ne": "Cancelado"}, 
+            "criado_em": {"$gte": hoje - timedelta(days=30)} # Simplificação para apanhar os ativos
+        }).limit(20)
+        agenda_ocupada = "\n".join([f"- Ocupado: {ag['data_hora']}" async for ag in cursor_agenda]) or "Agenda totalmente livre."
         
-        # 5. Atualiza o histórico
-        novo_historico = f"{historico}\nCliente: {msg_text}\nIA: {resposta_ia}"
-        await redis_client.set(redis_key, novo_historico[-1000:], ex=3600) 
+        # 4. ENVIAR PARA A IA
+        texto_resposta, acao_bot = gemini_service.processar_mensagem(msg_text, historico, info_cliente, agenda_ocupada)
         
-        # 6. Envia a resposta final (O envio desta mensagem cancela automaticamente o estado 'a escrever')
-        await enviar_mensagem_whatsapp(sender_phone, resposta_ia)
-        
-        # 7. Logs e BD
-        logs_collection = get_logs_collection()
-        await logs_collection.insert_one({
-            "telefone": sender_phone,
-            "mensagem_cliente": msg_text,
-            "resposta_ia": resposta_ia,
-            "timestamp": datetime.utcnow()
-        })
-        
-        if dados_agendamento:
+        # 5. EXECUTAR AÇÕES AUTÓNOMAS DA IA
+        tipo_acao = acao_bot.get("tipo_acao")
+        dados = acao_bot.get("dados", {})
+
+        if tipo_acao == "agendar":
             await agendamentos_collection.insert_one({
                 "telefone_cliente": sender_phone,
-                "nome_cliente": dados_agendamento.get("nome_cliente", "Desconhecido"),
-                "data_hora": dados_agendamento.get("data_hora", "A Combinar"),
-                "servico": dados_agendamento.get("servico_estetico_desejado", "Serviço Geral"),
+                "nome_cliente": dados.get("nome_cliente", "Cliente"),
+                "data_hora": dados.get("data_hora", "A Definir"),
+                "servico": dados.get("servico", "Estética"),
                 "status": "Pendente",
                 "criado_em": datetime.utcnow()
             })
+        
+        elif tipo_acao == "cancelar":
+            # Cancela o último agendamento Pendente ou Confirmado
+            await agendamentos_collection.update_one(
+                {"telefone_cliente": sender_phone, "status": {"$ne": "Cancelado"}},
+                {"$set": {"status": "Cancelado"}}
+            )
+            
+        elif tipo_acao == "chamar_humano":
+            # Pausa o bot por 12 horas (43200 segundos) para este número
+            await redis_client.set(handover_key, "true", ex=43200)
+            texto_resposta = "Compreendo perfeitamente. Vou transferir-te para a nossa equipa humana. Eles vão assumir esta conversa em breve!"
+
+        # 6. ATUALIZAR HISTÓRICO E LOG
+        novo_historico = f"{historico}\nCliente: {msg_text}\nIA: {texto_resposta}"
+        await redis_client.set(redis_key, novo_historico[-1500:], ex=7200) 
+        
+        await get_logs_collection().insert_one({
+            "telefone": sender_phone,
+            "mensagem_cliente": msg_text,
+            "resposta_ia": f"[{tipo_acao.upper()}] {texto_resposta}",
+            "timestamp": datetime.utcnow()
+        })
+        
+        # 7. ENVIAR RESPOSTA PARA O WHATSAPP (BOTÕES OU TEXTO NORMAL)
+        botoes = dados.get("botoes", [])
+        if tipo_acao == "enviar_botoes" and len(botoes) > 0:
+            await enviar_botoes_whatsapp(sender_phone, texto_resposta, botoes)
+        else:
+            await enviar_mensagem_whatsapp(sender_phone, texto_resposta)
 
         return {"status": "ok"}
         
     except Exception as e:
-        logger.error(f"Erro no processamento do webhook: {e}")
+        logger.error(f"Erro no webhook: {e}")
         logger.error(traceback.format_exc()) 
         return {"status": "ok"} 
 
 # --- FUNÇÕES META API ---
 
 async def marcar_como_lida_e_a_escrever(message_id: str):
-    """
-    Avisa a Meta que a mensagem foi lida (gera os pontinhos azuis) 
-    E ativa o indicador de digitação ('a escrever...').
-    """
     url = f"https://graph.facebook.com/{API_VERSION}/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "status": "read",
-        "message_id": message_id,
-        "typing_indicator": {
-            "type": "text"
-        }
-    }
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "status": "read", "message_id": message_id, "typing_indicator": {"type": "text"}}
     try:
         async with httpx.AsyncClient() as client:
             await client.post(url, headers=headers, json=payload)
-    except Exception as e:
-        logger.error(f"Erro ao marcar mensagem como lida e a escrever: {e}")
+    except: pass
 
 async def enviar_mensagem_whatsapp(to_phone: str, message: str):
-    """Envia a resposta gerada pela IA"""
     url = f"https://graph.facebook.com/{API_VERSION}/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": to_phone, "type": "text", "text": {"body": message}}
+    async with httpx.AsyncClient() as client:
+        await client.post(url, headers=headers, json=payload)
+
+async def enviar_botoes_whatsapp(to_phone: str, texto: str, botoes: list):
+    """Envia uma mensagem interativa com até 3 botões."""
+    url = f"https://graph.facebook.com/{API_VERSION}/{PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    
+    botoes_formatados = []
+    for i, btn_text in enumerate(botoes[:3]): # Máximo 3 botões permitidos pela Meta
+        botoes_formatados.append({
+            "type": "reply",
+            "reply": {
+                "id": f"btn_{i}",
+                "title": btn_text[:20] # A Meta exige máximo de 20 caracteres por botão
+            }
+        })
+
     payload = {
         "messaging_product": "whatsapp",
         "to": to_phone,
-        "type": "text",
-        "text": {"body": message}
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": { "text": texto },
+            "action": { "buttons": botoes_formatados }
+        }
     }
+    
     async with httpx.AsyncClient() as client:
-        await client.post(url, headers=headers, json=payload)
+        res = await client.post(url, headers=headers, json=payload)
+        if res.status_code != 200:
+            # Fallback caso a API bloqueie os botões: envia como texto normal
+            await enviar_mensagem_whatsapp(to_phone, f"{texto}\n\nOpções:\n- " + "\n- ".join(botoes))
