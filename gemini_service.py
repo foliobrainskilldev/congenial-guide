@@ -1,4 +1,3 @@
-# backend/gemini_service.py
 import os
 import json
 import logging
@@ -6,7 +5,7 @@ import traceback
 from typing import Dict, Any, Tuple
 
 import chromadb
-from chromadb.config import Settings # <- IMPORTAÇÃO NOVA PARA DESLIGAR TELEMETRIA
+from chromadb.config import Settings
 from google import genai
 from google.genai import types
 
@@ -43,9 +42,10 @@ class GeminiService:
             logger.error(f"Erro ao carregar RAG: {e}")
 
     def _obter_contexto_rag(self, query: str) -> str:
-        if self.collection.count() == 0:
-            return ""
+        # Envolvido em try/except para evitar crashes do ChromaDB na base principal
         try:
+            if self.collection.count() == 0:
+                return ""
             resultados = self.collection.query(query_texts=[query], n_results=2)
             return "\n".join(resultados.get("documents", [[]])[0])
         except Exception:
@@ -54,28 +54,30 @@ class GeminiService:
     def processar_mensagem(self, query: str, historico: str, info_cliente: str, agenda_ocupada: str) -> Tuple[str, Dict[str, Any]]:
         contexto_rag = self._obter_contexto_rag(query)
         
+        # CORREÇÃO CRUCIAL 1: Usar types.Schema em vez de Dicionários Crús.
+        # Versões recentes de google-genai são estritas na validação de schemas.
         tools_clinica = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
                     name="acao_sistema",
                     description="Executa ações vitais no sistema (agendar, cancelar, reagendar, chamar humano ou enviar botões).",
-                    parameters={
-                        "type": "OBJECT",
-                        "properties": {
-                            "tipo_acao": {
-                                "type": "STRING", 
-                                "description": "Escolhe: 'agendar', 'cancelar', 'reagendar', 'chamar_humano', 'enviar_botoes' ou 'nenhuma'."
-                            },
-                            "nome_cliente": {"type": "STRING", "description": "Nome do cliente (se aplicável)."},
-                            "data_hora": {"type": "STRING", "description": "Data/Hora desejada (ex: 15/06 às 14:00)."},
-                            "servico": {"type": "STRING", "description": "Serviço estético desejado."},
-                            "texto_mensagem": {"type": "STRING", "description": "Texto que o bot deve dizer ao cliente."},
-                            "botao_1": {"type": "STRING", "description": "Texto do botão 1 (máx 20 letras)."},
-                            "botao_2": {"type": "STRING", "description": "Texto do botão 2 (máx 20 letras)."},
-                            "botao_3": {"type": "STRING", "description": "Texto do botão 3 (máx 20 letras)."}
+                    parameters=types.Schema(
+                        type="OBJECT",
+                        properties={
+                            "tipo_acao": types.Schema(
+                                type="STRING", 
+                                description="Escolhe: 'agendar', 'cancelar', 'reagendar', 'chamar_humano', 'enviar_botoes' ou 'nenhuma'."
+                            ),
+                            "nome_cliente": types.Schema(type="STRING", description="Nome do cliente (se aplicável)."),
+                            "data_hora": types.Schema(type="STRING", description="Data/Hora desejada (ex: 15/06 às 14:00)."),
+                            "servico": types.Schema(type="STRING", description="Serviço estético desejado."),
+                            "texto_mensagem": types.Schema(type="STRING", description="Texto que o bot deve dizer ao cliente."),
+                            "botao_1": types.Schema(type="STRING", description="Texto do botão 1 (máx 20 letras)."),
+                            "botao_2": types.Schema(type="STRING", description="Texto do botão 2 (máx 20 letras)."),
+                            "botao_3": types.Schema(type="STRING", description="Texto do botão 3 (máx 20 letras).")
                         },
-                        "required": ["tipo_acao", "texto_mensagem"]
-                    }
+                        required=["tipo_acao", "texto_mensagem"]
+                    )
                 )
             ]
         )
@@ -111,12 +113,20 @@ class GeminiService:
                 )
             )
 
+            # Iteramos pelas partes de forma segura para intercetar o function_call
             if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
                     if getattr(part, 'function_call', None):
                         func_call = part.function_call
                         if func_call.name == "acao_sistema":
-                            args = func_call.args if isinstance(func_call.args, dict) else dict(func_call.args)
+                            
+                            # CORREÇÃO CRUCIAL 2: Prevenir falha na conversão dos parâmetros
+                            args = func_call.args or {}
+                            if not isinstance(args, dict):
+                                try:
+                                    args = dict(args)
+                                except Exception:
+                                    args = {}
                             
                             acao_bot["tipo_acao"] = args.get("tipo_acao", "nenhuma")
                             acao_bot["texto_mensagem"] = args.get("texto_mensagem", "Anotado!")
@@ -129,7 +139,20 @@ class GeminiService:
                             }
                             return acao_bot["texto_mensagem"], acao_bot
 
-            texto_normal = response.text if response.text else "Não entendi, podes reformular?"
+            # CORREÇÃO CRUCIAL 3: Aceder a texto de forma segura
+            # Evita o "ValueError" causado pelo `response.text` se o modelo não responder texto.
+            texto_normal = ""
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if getattr(part, 'text', None):
+                        texto_normal += part.text
+            
+            if not texto_normal:
+                try:
+                    texto_normal = response.text if response.text else "Não entendi, podes reformular?"
+                except Exception:
+                    texto_normal = "Não entendi, podes reformular?"
+
             acao_bot["texto_mensagem"] = texto_normal
             return texto_normal, acao_bot
 
