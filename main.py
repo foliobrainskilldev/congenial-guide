@@ -24,6 +24,9 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
 
+# ATUALIZAÇÃO IMPORTANTE: Usar versão recente da API para suportar o 'typing_indicator'
+API_VERSION = "v21.0" 
+
 # Instância FastAPI
 app = FastAPI(title="Aura Estética API", version="1.0.0")
 
@@ -141,18 +144,15 @@ async def process_whatsapp_message(request: Request):
             await enviar_mensagem_whatsapp(sender_phone, "Ainda não consigo ouvir áudios ou ver imagens. Por favor, escreve a tua mensagem em texto!")
             return {"status": "ok"}
 
-        # 1. MARCA COMO LIDA IMEDIATAMENTE (PONTINHOS AZUIS)
+        # 1. MARCA COMO LIDA (Pontinhos Azuis) E MOSTRA "A ESCREVER..."
         if message_id:
-            await marcar_como_lida(message_id)
+            await marcar_como_lida_e_a_escrever(message_id)
 
-        # 2. TENTA ATIVAR O ESTADO "A ESCREVER..."
-        await mostrar_a_escrever(sender_phone)
-
-        # 3. Recupera histórico do Redis
+        # 2. Recupera histórico do Redis
         redis_key = f"chat_history:{sender_phone}"
         historico = await redis_client.get(redis_key) or ""
         
-        # 4. Busca os agendamentos reais
+        # 3. Busca os agendamentos reais
         agendamentos_collection = get_agendamentos_collection()
         cursor = agendamentos_collection.find({"telefone_cliente": sender_phone}).sort("criado_em", -1).limit(3)
         agendamentos_db = []
@@ -167,17 +167,17 @@ async def process_whatsapp_message(request: Request):
         else:
             texto_agendamentos = "O cliente ainda não tem agendamentos registados no sistema."
         
-        # 5. IA gera a resposta
+        # 4. IA gera a resposta (Isto demora uns segundos, o que é perfeito para o cliente ver o "a escrever")
         resposta_ia, dados_agendamento = gemini_service.processar_mensagem(msg_text, historico, texto_agendamentos)
         
-        # 6. Atualiza o histórico
+        # 5. Atualiza o histórico
         novo_historico = f"{historico}\nCliente: {msg_text}\nIA: {resposta_ia}"
         await redis_client.set(redis_key, novo_historico[-1000:], ex=3600) 
         
-        # 7. Envia a resposta final
+        # 6. Envia a resposta final (O envio desta mensagem cancela automaticamente o estado 'a escrever')
         await enviar_mensagem_whatsapp(sender_phone, resposta_ia)
         
-        # 8. Logs e BD
+        # 7. Logs e BD
         logs_collection = get_logs_collection()
         await logs_collection.insert_one({
             "telefone": sender_phone,
@@ -205,9 +205,12 @@ async def process_whatsapp_message(request: Request):
 
 # --- FUNÇÕES META API ---
 
-async def marcar_como_lida(message_id: str):
-    """Avisa a Meta que a mensagem foi lida, gerando os pontinhos azuis no cliente."""
-    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+async def marcar_como_lida_e_a_escrever(message_id: str):
+    """
+    Avisa a Meta que a mensagem foi lida (gera os pontinhos azuis) 
+    E ativa o indicador de digitação ('a escrever...').
+    """
+    url = f"https://graph.facebook.com/{API_VERSION}/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
@@ -215,40 +218,20 @@ async def marcar_como_lida(message_id: str):
     payload = {
         "messaging_product": "whatsapp",
         "status": "read",
-        "message_id": message_id
-    }
-    try:
-        async with httpx.AsyncClient() as client:
-            await client.post(url, headers=headers, json=payload)
-    except Exception as e:
-        logger.error(f"Erro ao marcar mensagem como lida: {e}")
-
-async def mostrar_a_escrever(to_phone: str):
-    """Testa a funcionalidade 'A escrever...' baseada na sugestão."""
-    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    # Aqui colocamos exatamente o parâmetro sugerido, adaptado com o "to" (destinatário) obrigatório da Meta
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
+        "message_id": message_id,
         "typing_indicator": {
             "type": "text"
         }
     }
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, headers=headers, json=payload)
-            # Se a Meta não aceitar isto, devolve um erro. Escrevemos no log para descobrir!
-            if response.status_code != 200:
-                logger.warning(f"Resposta da Meta sobre o 'A escrever': {response.text}")
+            await client.post(url, headers=headers, json=payload)
     except Exception as e:
-        logger.error(f"Erro ao tentar mostrar 'A escrever': {e}")
+        logger.error(f"Erro ao marcar mensagem como lida e a escrever: {e}")
 
 async def enviar_mensagem_whatsapp(to_phone: str, message: str):
-    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    """Envia a resposta gerada pela IA"""
+    url = f"https://graph.facebook.com/{API_VERSION}/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
