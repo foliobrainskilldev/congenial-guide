@@ -1,12 +1,12 @@
 # backend/gemini_service.py
 import os
-os.environ["ANONYMIZED_TELEMETRY"] = "False"
-
 import json
 import logging
 import traceback
 from typing import Dict, Any, Tuple
+
 import chromadb
+from chromadb.config import Settings # <- IMPORTAÇÃO NOVA PARA DESLIGAR TELEMETRIA
 from google import genai
 from google.genai import types
 
@@ -18,7 +18,10 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 class GeminiService:
     def __init__(self):
         self.model_name = 'gemini-2.5-flash'
-        self.chroma_client = chromadb.Client()
+        
+        # DEFINIR A CONFIGURAÇÃO PARA CALAR O ERRO DE TELEMETRIA
+        self.chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
+        
         self.collection_name = "aura_conhecimento"
         self.collection = self.chroma_client.get_or_create_collection(name=self.collection_name)
         self._carregar_base_conhecimento()
@@ -51,7 +54,6 @@ class GeminiService:
     def processar_mensagem(self, query: str, historico: str, info_cliente: str, agenda_ocupada: str) -> Tuple[str, Dict[str, Any]]:
         contexto_rag = self._obter_contexto_rag(query)
         
-        # --- DEFINIÇÃO DAS NOVAS FERRAMENTAS (TOOLS) ---
         tools_clinica = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
@@ -105,11 +107,10 @@ class GeminiService:
                 contents=prompt_sistema,
                 config=types.GenerateContentConfig(
                     tools=[tools_clinica],
-                    temperature=0.5 # Aumentado ligeiramente para ser mais criativo/natural
+                    temperature=0.5 
                 )
             )
 
-            # Processar se a IA chamou uma ferramenta
             if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
                     if getattr(part, 'function_call', None):
@@ -120,7 +121,6 @@ class GeminiService:
                             acao_bot["tipo_acao"] = args.get("tipo_acao", "nenhuma")
                             acao_bot["texto_mensagem"] = args.get("texto_mensagem", "Anotado!")
                             
-                            # Guarda dados extra dependendo da ação
                             acao_bot["dados"] = {
                                 "nome_cliente": args.get("nome_cliente", ""),
                                 "data_hora": args.get("data_hora", ""),
@@ -129,7 +129,6 @@ class GeminiService:
                             }
                             return acao_bot["texto_mensagem"], acao_bot
 
-            # Se não ativou a ferramenta, pega o texto normal
             texto_normal = response.text if response.text else "Não entendi, podes reformular?"
             acao_bot["texto_mensagem"] = texto_normal
             return texto_normal, acao_bot
