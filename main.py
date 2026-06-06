@@ -120,7 +120,6 @@ async def process_whatsapp_message(request: Request):
     try:
         body = await request.json()
         
-        # Extração defensiva da estrutura do WhatsApp
         entries = body.get("entry", [])
         if not entries:
             return {"status": "ok"}
@@ -132,18 +131,21 @@ async def process_whatsapp_message(request: Request):
         value = changes[0].get("value", {})
         messages = value.get("messages", [])
         
-        # Se for um evento de leitura/entrega de mensagem (sem conteúdo de texto)
         if not messages:
             return {"status": "ok", "msg": "Evento ignorado"}
             
         msg_obj = messages[0]
         sender_phone = msg_obj.get("from")
+        message_id = msg_obj.get("id") # <-- Captura o ID da mensagem recebida
         
-        # Só processamos texto
         msg_text = msg_obj.get("text", {}).get("body", "")
         if not msg_text:
             await enviar_mensagem_whatsapp(sender_phone, "Ainda não consigo ouvir áudios ou ver imagens. Por favor, escreve a tua mensagem em texto!")
             return {"status": "ok"}
+
+        # --- NOVO: MARCA COMO LIDA IMEDIATAMENTE (PONTINHOS AZUIS) ---
+        if message_id:
+            await marcar_como_lida(message_id)
 
         # 1. Recupera histórico do Redis
         redis_key = f"chat_history:{sender_phone}"
@@ -199,8 +201,26 @@ async def process_whatsapp_message(request: Request):
     except Exception as e:
         logger.error(f"Erro no processamento do webhook: {e}")
         logger.error(traceback.format_exc()) 
-        # Importante: Retorna sempre 200 OK para o WhatsApp não bloquear a app
         return {"status": "ok"} 
+
+# --- NOVA FUNÇÃO PARA OS PONTINHOS AZUIS ---
+async def marcar_como_lida(message_id: str):
+    """Avisa a Meta que a mensagem foi lida, gerando os pontinhos azuis no cliente."""
+    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(url, headers=headers, json=payload)
+    except Exception as e:
+        logger.error(f"Erro ao marcar mensagem como lida: {e}")
 
 async def enviar_mensagem_whatsapp(to_phone: str, message: str):
     """Envia resposta usando httpx assíncrono."""
