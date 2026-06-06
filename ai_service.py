@@ -1,4 +1,6 @@
+# backend/ai_service.py
 import os
+import sys
 import json
 import logging
 import traceback
@@ -15,15 +17,20 @@ from groq import Groq
 
 logger = logging.getLogger(__name__)
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# Inicia o cliente Groq
+# Tenta carregar a chave e limpa espaços vazios acidentais
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+
+if GROQ_API_KEY:
+    print("✅ Groq API Key detetada e pronta a usar.", flush=True)
+else:
+    print("❌ AVISO CRÍTICO: A variável GROQ_API_KEY não foi encontrada!", flush=True)
+
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 class AIService:
     def __init__(self):
-        # Llama 3.3 70B Versatile é o modelo de ponta recomendado na Groq. 
-        # Extremamente inteligente, rápido e com limites altos.
-        self.model_name = 'llama-3.3-70b-versatile'
+        # Llama 3.1 70B é o modelo mais estável e inteligente da Groq para interpretar ferramentas/ações
+        self.model_name = 'llama-3.1-70b-versatile'
         
         self.chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
         self.collection_name = "aura_conhecimento"
@@ -57,11 +64,10 @@ class AIService:
 
     def processar_mensagem(self, query: str, historico: str, info_cliente: str, agenda_ocupada: str) -> Tuple[str, Dict[str, Any]]:
         if not client:
-            return "Erro: Chave da Groq não configurada (GROQ_API_KEY).", {"tipo_acao": "nenhuma"}
+            return "Erro: A chave GROQ_API_KEY não foi configurada no sistema.", {"tipo_acao": "nenhuma"}
 
         contexto_rag = self._obter_contexto_rag(query)
         
-        # Ferramenta traduzida para o formato que a Groq/OpenAI usa
         tools_clinica = [
             {
                 "type": "function",
@@ -121,12 +127,11 @@ class AIService:
                 tools=tools_clinica,
                 tool_choice="auto",
                 temperature=0.5,
-                max_completion_tokens=1024
+                max_tokens=1024 # CORREÇÃO CRUCIAL AQUI
             )
 
             response_message = response.choices[0].message
             
-            # Se a IA decidiu chamar a nossa ferramenta
             if response_message.tool_calls:
                 for tool_call in response_message.tool_calls:
                     if tool_call.function.name == "acao_sistema":
@@ -146,7 +151,6 @@ class AIService:
                         }
                         return acao_bot["texto_mensagem"], acao_bot
 
-            # Se não chamou ferramenta, devolve o texto normal da resposta
             texto_normal = response_message.content
             if not texto_normal:
                 texto_normal = "Não entendi, podes reformular?"
@@ -155,8 +159,10 @@ class AIService:
             return texto_normal, acao_bot
 
         except Exception as e:
-            logger.error(f"Erro no Groq: {e}")
-            logger.error(traceback.format_exc())
+            # RADARES PARA O TEU TERMINAL
+            print(f"\n❌ ERRO FATAL NO GROQ: {e}", flush=True)
+            print(traceback.format_exc(), flush=True)
+            
             acao_bot["texto_mensagem"] = "Aguarde um momento, ocorreu uma pequena falha técnica. Voltarei a tentar num instante!"
             return acao_bot["texto_mensagem"], acao_bot
 
