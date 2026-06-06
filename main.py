@@ -2,13 +2,13 @@
 import os
 import httpx
 import logging
-import json
 import traceback
 from datetime import datetime
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import redis.asyncio as redis
+from bson import ObjectId
 
 from database import DatabaseManager, get_agendamentos_collection, get_logs_collection
 from gemini_service import gemini_service
@@ -80,7 +80,6 @@ async def listar_agendamentos():
 
 @app.patch("/api/agendamentos/{id_agendamento}")
 async def atualizar_agendamento(id_agendamento: str, update_data: AgendamentoUpdate):
-    from bson import ObjectId
     agendamentos_collection = get_agendamentos_collection()
     resultado = await agendamentos_collection.update_one(
         {"_id": ObjectId(id_agendamento)}, 
@@ -121,7 +120,7 @@ async def process_whatsapp_message(request: Request):
     try:
         body = await request.json()
         
-        # Extração SUPER defensiva para evitar o erro "OBJECT" de Indexação
+        # Extração defensiva da estrutura do WhatsApp
         entries = body.get("entry", [])
         if not entries:
             return {"status": "ok"}
@@ -140,7 +139,7 @@ async def process_whatsapp_message(request: Request):
         msg_obj = messages[0]
         sender_phone = msg_obj.get("from")
         
-        # Só processamos texto. Imagens/Áudios disparam uma mensagem de aviso.
+        # Só processamos texto
         msg_text = msg_obj.get("text", {}).get("body", "")
         if not msg_text:
             await enviar_mensagem_whatsapp(sender_phone, "Ainda não consigo ouvir áudios ou ver imagens. Por favor, escreve a tua mensagem em texto!")
@@ -150,17 +149,32 @@ async def process_whatsapp_message(request: Request):
         redis_key = f"chat_history:{sender_phone}"
         historico = await redis_client.get(redis_key) or ""
         
-        # 2. IA gera a resposta
-        resposta_ia, dados_agendamento = gemini_service.processar_mensagem(msg_text, historico)
+        # 2. BUSCA OS AGENDAMENTOS REAIS NA BASE DE DADOS MONGODB PARA INJETAR NO PROMPT
+        agendamentos_collection = get_agendamentos_collection()
+        cursor = agendamentos_collection.find({"telefone_cliente": sender_phone}).sort("criado_em", -1).limit(3)
+        agendamentos_db = []
+        async for doc in cursor:
+            agendamentos_db.append(doc)
+            
+        texto_agendamentos = ""
+        if agendamentos_db:
+            texto_agendamentos = "Agendamentos atuais deste cliente na base de dados (MongoDB):\n"
+            for ag in agendamentos_db:
+                texto_agendamentos += f"- Serviço: {ag.get('servico')}, Data: {ag.get('data_hora')}, Status: {ag.get('status')}\n"
+        else:
+            texto_agendamentos = "O cliente ainda não tem agendamentos registados no sistema."
         
-        # 3. Atualiza o histórico no Redis (Expira em 1 hora)
+        # 3. IA gera a resposta (Agora com contexto da BD!)
+        resposta_ia, dados_agendamento = gemini_service.processar_mensagem(msg_text, historico, texto_agendamentos)
+        
+        # 4. Atualiza o histórico no Redis (Expira em 1 hora)
         novo_historico = f"{historico}\nCliente: {msg_text}\nIA: {resposta_ia}"
         await redis_client.set(redis_key, novo_historico[-1000:], ex=3600) 
         
-        # 4. Envia resposta de volta via Meta Graph API
+        # 5. Envia resposta de volta via Meta Graph API
         await enviar_mensagem_whatsapp(sender_phone, resposta_ia)
         
-        # 5. Salva Log de Interação no MongoDB
+        # 6. Salva Log de Interação no MongoDB
         logs_collection = get_logs_collection()
         await logs_collection.insert_one({
             "telefone": sender_phone,
@@ -169,9 +183,8 @@ async def process_whatsapp_message(request: Request):
             "timestamp": datetime.utcnow()
         })
         
-        # 6. Se capturou um agendamento, salva no MongoDB
+        # 7. Se a IA capturou um NOVO agendamento, salva no MongoDB
         if dados_agendamento:
-            agendamentos_collection = get_agendamentos_collection()
             await agendamentos_collection.insert_one({
                 "telefone_cliente": sender_phone,
                 "nome_cliente": dados_agendamento.get("nome_cliente", "Desconhecido"),
@@ -185,7 +198,6 @@ async def process_whatsapp_message(request: Request):
         
     except Exception as e:
         logger.error(f"Erro no processamento do webhook: {e}")
-        # A magia está aqui: Imprime a linha EXATA do erro no Log do Render
         logger.error(traceback.format_exc()) 
         # Importante: Retorna sempre 200 OK para o WhatsApp não bloquear a app
         return {"status": "ok"} 
