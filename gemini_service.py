@@ -1,11 +1,10 @@
-# backend/gemini_service.py
 import os
 import json
 import logging
 import traceback
 from typing import Dict, Any, Tuple
 
-# --- CORREÇÃO: SILENCIAR O ERRO FALSO DO CHROMADB (POSTHOG) ---
+# --- SILENCIAR O ERRO FALSO DO CHROMADB (POSTHOG) ---
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["CHROMA_TELEMETRY_DISABLED"] = "1"
 logging.getLogger('chromadb.telemetry.product.posthog').setLevel(logging.CRITICAL)
@@ -22,9 +21,9 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 class GeminiService:
     def __init__(self):
-        # --- CORREÇÃO: MUDAR O MODELO PARA O ESTÁVEL E DE ALTO LIMITE ---
-        # gemini-2.0-flash é o modelo principal com 1500 requisições diárias gratuitas
-        self.model_name = 'gemini-2.0-flash'
+        # --- VOLTAMOS PARA O TEU MODELO ORIGINAL ---
+        # É o único modelo em que a Google te dá limite nesta conta.
+        self.model_name = 'gemini-2.5-flash'
         
         self.chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
         
