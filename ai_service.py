@@ -1,12 +1,11 @@
 # backend/ai_service.py
 import os
-import sys
+import io
 import json
 import logging
 import traceback
 from typing import Dict, Any, Tuple
 
-# --- SILENCIAR O ERRO FALSO DO CHROMADB (POSTHOG) ---
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["CHROMA_TELEMETRY_DISABLED"] = "1"
 logging.getLogger('chromadb.telemetry.product.posthog').setLevel(logging.CRITICAL)
@@ -17,152 +16,120 @@ from groq import Groq
 
 logger = logging.getLogger(__name__)
 
-# Tenta carregar a chave e limpa espaços vazios acidentais
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-
-if GROQ_API_KEY:
-    print("✅ Groq API Key detetada e pronta a usar.", flush=True)
-else:
-    print("❌ AVISO CRÍTICO: A variável GROQ_API_KEY não foi encontrada!", flush=True)
-
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 class AIService:
     def __init__(self):
-        # --- CORREÇÃO: Atualizado para o Llama 3.3 (a versão nova suportada pela Groq) ---
         self.model_name = 'llama-3.3-70b-versatile'
-        
+        self.audio_model = 'whisper-large-v3'
         self.chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
-        self.collection_name = "aura_conhecimento"
-        self.collection = self.chroma_client.get_or_create_collection(name=self.collection_name)
-        self._carregar_base_conhecimento()
+        self.collection = self.chroma_client.get_or_create_collection(name="aura_knowledge")
+        self._load_knowledge_base()
 
-    def _carregar_base_conhecimento(self):
+    def _load_knowledge_base(self):
         try:
-            caminho_arquivo = os.path.join(os.path.dirname(__file__), "conhecimento.json") if '__file__' in globals() else "conhecimento.json"
-            if not os.path.exists(caminho_arquivo):
-                return
-            with open(caminho_arquivo, "r", encoding="utf-8") as f:
-                dados = json.load(f)
-            if not dados:
-                return
-            ids = [item["id"] for item in dados]
-            documentos = [item["texto"] for item in dados]
-            self.collection.add(documents=documentos, ids=ids)
-            logger.info("✅ Base de conhecimento RAG carregada.")
+            file_path = os.path.join(os.path.dirname(__file__), "conhecimento.json") if '__file__' in globals() else "conhecimento.json"
+            if not os.path.exists(file_path): return
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data:
+                self.collection.add(documents=[item["texto"] for item in data], ids=[item["id"] for item in data])
+                logger.info("✅ RAG knowledge base loaded.")
         except Exception as e:
-            logger.error(f"Erro ao carregar RAG: {e}")
+            logger.error(f"Error loading RAG: {e}")
 
-    def _obter_contexto_rag(self, query: str) -> str:
+    def _get_rag_context(self, query: str) -> str:
         try:
-            if self.collection.count() == 0:
-                return ""
-            resultados = self.collection.query(query_texts=[query], n_results=2)
-            return "\n".join(resultados.get("documents", [[]])[0])
+            if self.collection.count() == 0: return ""
+            results = self.collection.query(query_texts=[query], n_results=2)
+            return "\n".join(results.get("documents", [[]])[0])
         except Exception:
             return ""
 
-    def processar_mensagem(self, query: str, historico: str, info_cliente: str, agenda_ocupada: str) -> Tuple[str, Dict[str, Any]]:
-        if not client:
-            return "Erro: A chave GROQ_API_KEY não foi configurada no sistema.", {"tipo_acao": "nenhuma"}
+    # NEW: Audio Transcription using Groq Whisper!
+    def transcribe_audio(self, audio_bytes: bytes) -> str:
+        if not client: return ""
+        try:
+            file_tuple = ("audio.ogg", audio_bytes, "audio/ogg")
+            transcription = client.audio.transcriptions.create(
+                file=file_tuple,
+                model=self.audio_model
+            )
+            return transcription.text
+        except Exception as e:
+            logger.error(f"❌ Error transcribing audio: {e}")
+            return "Audio message could not be transcribed."
 
-        contexto_rag = self._obter_contexto_rag(query)
+    def process_message(self, query: str, chat_history: str, client_info: str, busy_schedule: str) -> Tuple[str, Dict[str, Any]]:
+        if not client: return "Error: GROQ_API_KEY not configured.", {"action_type": "none"}
+
+        rag_context = self._get_rag_context(query)
         
-        tools_clinica = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "acao_sistema",
-                    "description": "Executa ações vitais no sistema (agendar, cancelar, reagendar, chamar humano ou enviar botões).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "tipo_acao": {
-                                "type": "string",
-                                "description": "Escolhe: 'agendar', 'cancelar', 'reagendar', 'chamar_humano', 'enviar_botoes' ou 'nenhuma'."
-                            },
-                            "nome_cliente": {"type": "string", "description": "Nome do cliente (se aplicável)."},
-                            "data_hora": {"type": "string", "description": "Data/Hora desejada (ex: 15/06 às 14:00)."},
-                            "servico": {"type": "string", "description": "Serviço estético desejado."},
-                            "texto_mensagem": {"type": "string", "description": "Texto que o bot deve dizer ao cliente."},
-                            "botao_1": {"type": "string", "description": "Texto do botão 1 (máx 20 letras)."},
-                            "botao_2": {"type": "string", "description": "Texto do botão 2 (máx 20 letras)."},
-                            "botao_3": {"type": "string", "description": "Texto do botão 3 (máx 20 letras)."}
-                        },
-                        "required": ["tipo_acao", "texto_mensagem"]
-                    }
+        clinic_tools = [{
+            "type": "function",
+            "function": {
+                "name": "system_action",
+                "description": "Executes vital system actions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action_type": { "type": "string", "enum": ["schedule", "cancel", "reschedule", "call_human", "send_buttons", "none"] },
+                        "client_name": {"type": "string"},
+                        "date_time": {"type": "string"},
+                        "service": {"type": "string"},
+                        "message_text": {"type": "string", "description": "Response text for the client."},
+                        "buttons": { "type": "array", "items": {"type": "string"}, "description": "Max 3 buttons (max 20 chars each)." }
+                    },
+                    "required": ["action_type", "message_text"]
                 }
             }
-        ]
+        }]
 
-        prompt_sistema = (
-            "És a rececionista virtual avançada da 'Aura Estética'. "
-            "REGRAS DE OURO:\n"
-            "1. ADAPTA-TE AO HUMOR: Analisa se o cliente está feliz, apressado ou irritado. Responde com a emoção correspondente. Não sejas robótica. Usa linguagem natural e variada.\n"
-            "2. CALENDÁRIO: NUNCA agendes para um horário que esteja na lista de 'Agenda Ocupada'. Se pedirem, sugere outro horário livre próximo.\n"
-            "3. BOTÕES DO WHATSAPP: Se precisares que o cliente confirme algo ou escolha entre 2 opções, usa a 'tipo_acao': 'enviar_botoes' e preenche o botao_1 e botao_2.\n"
-            "4. PASSAR A HUMANO: Se o cliente estiver chateado, confuso, ou pedir para falar com uma pessoa, usa a 'tipo_acao': 'chamar_humano'.\n"
-            "5. CANCELAR/REAGENDAR: Se o cliente quiser cancelar ou mudar a hora, usa 'cancelar' ou 'reagendar'.\n\n"
-            f"HISTÓRICO DO CHAT:\n{historico}\n\n"
-            f"BASE DE DADOS RAG:\n{contexto_rag}\n\n"
-            f"AGENDAMENTOS ATUAIS DESTE CLIENTE:\n{info_cliente}\n\n"
-            f"AGENDA OCUPADA DA CLÍNICA (NÃO MARCAR AQUI):\n{agenda_ocupada}\n"
+        system_prompt = (
+            "You are the virtual receptionist of 'Aura Esthetics'.\n"
+            "1. BE EMPATHETIC: Match the client's mood.\n"
+            "2. CALENDAR: NEVER schedule on the 'Busy Schedule' list. Check it strictly.\n"
+            "3. BUTTONS: If offering choices, use 'send_buttons' with up to 3 options.\n"
+            "4. HUMAN TRANSFER: If the client is upset or demands a person, use 'call_human'.\n\n"
+            f"CHAT HISTORY:\n{chat_history}\n\n"
+            f"RAG DATABASE:\n{rag_context}\n\n"
+            f"CLIENT APPOINTMENTS:\n{client_info}\n\n"
+            f"BUSY SCHEDULE:\n{busy_schedule}\n"
         )
 
-        acao_bot = {
-            "tipo_acao": "nenhuma",
-            "texto_mensagem": "",
-            "dados": {}
-        }
-
-        messages = [
-            {"role": "system", "content": prompt_sistema},
-            {"role": "user", "content": query}
-        ]
+        bot_action = { "action_type": "none", "message_text": "", "data": {} }
 
         try:
             response = client.chat.completions.create(
                 model=self.model_name,
-                messages=messages,
-                tools=tools_clinica,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": query}],
+                tools=clinic_tools,
                 tool_choice="auto",
-                temperature=0.5,
-                max_tokens=1024
+                temperature=0.4,
+                max_tokens=800
             )
 
-            response_message = response.choices[0].message
-            
-            if response_message.tool_calls:
-                for tool_call in response_message.tool_calls:
-                    if tool_call.function.name == "acao_sistema":
-                        try:
-                            args = json.loads(tool_call.function.arguments)
-                        except Exception:
-                            args = {}
-                        
-                        acao_bot["tipo_acao"] = args.get("tipo_acao", "nenhuma")
-                        acao_bot["texto_mensagem"] = args.get("texto_mensagem", "Anotado!")
-                        
-                        acao_bot["dados"] = {
-                            "nome_cliente": args.get("nome_cliente", ""),
-                            "data_hora": args.get("data_hora", ""),
-                            "servico": args.get("servico", ""),
-                            "botoes": [b for b in [args.get("botao_1"), args.get("botao_2"), args.get("botao_3")] if b]
+            msg = response.choices[0].message
+            if msg.tool_calls:
+                for tool in msg.tool_calls:
+                    if tool.function.name == "system_action":
+                        args = json.loads(tool.function.arguments)
+                        bot_action["action_type"] = args.get("action_type", "none")
+                        bot_action["message_text"] = args.get("message_text", "Noted!")
+                        bot_action["data"] = {
+                            "client_name": args.get("client_name", ""),
+                            "date_time": args.get("date_time", ""),
+                            "service": args.get("service", ""),
+                            "buttons": args.get("buttons", [])
                         }
-                        return acao_bot["texto_mensagem"], acao_bot
+                        return bot_action["message_text"], bot_action
 
-            texto_normal = response_message.content
-            if not texto_normal:
-                texto_normal = "Não entendi, podes reformular?"
-                
-            acao_bot["texto_mensagem"] = texto_normal
-            return texto_normal, acao_bot
+            bot_action["message_text"] = msg.content or "I didn't quite catch that."
+            return bot_action["message_text"], bot_action
 
         except Exception as e:
-            print(f"\n❌ ERRO FATAL NO GROQ: {e}", flush=True)
-            print(traceback.format_exc(), flush=True)
-            
-            acao_bot["texto_mensagem"] = "Aguarde um momento, ocorreu uma pequena falha técnica. Voltarei a tentar num instante!"
-            return acao_bot["texto_mensagem"], acao_bot
+            logger.error(f"Groq API Error: {traceback.format_exc()}")
+            return "System is busy, please wait.", bot_action
 
 ai_service = AIService()

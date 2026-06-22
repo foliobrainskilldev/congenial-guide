@@ -11,27 +11,32 @@ class DatabaseManager:
 
     @classmethod
     async def connect_db(cls):
-        """Estabelece a conexão assíncrona com o MongoDB."""
+        """Establishes an asynchronous connection with MongoDB."""
         mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
         try:
             cls.client = AsyncIOMotorClient(mongo_uri)
-            # Utiliza o banco de dados 'aura_estetica'
-            cls.db = cls.client.aura_estetica
-            logger.info("✅ Conectado com sucesso ao MongoDB (Motor).")
+            cls.db = cls.client.aura_esthetics
+            logger.info("✅ Successfully connected to MongoDB (Motor).")
         except Exception as e:
-            logger.error(f"❌ Erro ao conectar ao MongoDB: {e}")
+            logger.error(f"❌ Error connecting to MongoDB: {e}")
             raise e
 
     @classmethod
     async def close_db(cls):
-        """Encerra a conexão com o MongoDB."""
+        """Closes the connection with MongoDB."""
         if cls.client:
             cls.client.close()
-            logger.info("🔌 Conexão com o MongoDB encerrada.")
+            logger.info("🔌 Connection with MongoDB closed.")
 
-# Utilitários para acesso rápido às coleções
-def get_agendamentos_collection():
-    return DatabaseManager.db["agendamentos"]
+# Utilities for quick access to collections
+def get_appointments_collection():
+    return DatabaseManager.db["appointments"]
 
 def get_logs_collection():
     return DatabaseManager.db["logs"]
+
+def get_users_collection():
+    return DatabaseManager.db["users"]
+
+def get_metrics_collection():
+    return DatabaseManager.db["metrics"]
