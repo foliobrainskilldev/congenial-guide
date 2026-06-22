@@ -1,30 +1,30 @@
 # backend/Dockerfile
 
-# 1. Usa a imagem oficial do Python, versão 'slim' para reduzir tamanho da imagem e tempo de build
+# 1. Use the official Python image, 'slim' version to reduce image size and build time
 FROM python:3.11-slim
 
-# 2. Define o diretório de trabalho dentro do container
+# 2. Set the working directory inside the container
 WORKDIR /app
 
-# 3. Variáveis de ambiente para otimizar o Python no Docker
+# 3. Environment variables to optimize Python within Docker
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# 4. Instala dependências do sistema operativo necessárias (algumas essenciais para compilar o ChromaDB/C++)
+# 4. Install necessary operating system dependencies (some are essential to compile ChromaDB/C++)
 RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# 5. Copia o ficheiro de requisitos e instala as dependências Python
+# 5. Copy the requirements file and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 6. Copia todo o restante código-fonte para a pasta /app do container
+# 6. Copy the rest of the source code to the /app directory in the container
 COPY . .
 
-# 7. Expõe a porta que o Render costuma usar por defeito (10000)
+# 7. Expose the port that Render usually uses by default (10000)
 EXPOSE 10000
 
-# 8. Comando para iniciar o servidor web assíncrono uvicorn
-# Vincula ao host 0.0.0.0 para aceitar conexões externas dentro da cloud
+# 8. Command to start the uvicorn asynchronous web server
+# Binds to the 0.0.0.0 host to accept external connections within the cloud environment
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
