@@ -1,14 +1,14 @@
 [
   {
-    "id": "tratamento_limpeza_pele",
-    "texto": "Tratamento: Limpeza de Pele Profunda. Descrição: Remove impurezas, cravos e células mortas, deixando a pele renovada. Duração: 60 minutos. Preço: 50€. Ideal para fazer 1 vez por mês."
+    "id": "treatment_deep_cleansing",
+    "texto": "Treatment: Deep Skin Cleansing. Description: Removes impurities, blackheads, and dead cells, leaving the skin renewed. Duration: 60 minutes. Price: 50€. Ideal to do once a month."
   },
   {
-    "id": "tratamento_botox",
-    "texto": "Tratamento: Aplicação de Botox. Descrição: Previne e reduz rugas de expressão na testa e ao redor dos olhos. Procedimento rápido e quase indolor. Duração: 30 minutos. Preço: 150€ por zona. Necessário avaliação prévia."
+    "id": "treatment_botox",
+    "texto": "Treatment: Botox Application. Description: Prevents and reduces expression wrinkles on the forehead and around the eyes. Fast and almost painless procedure. Duration: 30 minutes. Price: 150€ per zone. Prior evaluation required."
   },
   {
-    "id": "politica_clinica",
-    "texto": "A Aura Estética funciona de Segunda a Sexta, das 09:00 às 19:00. O endereço é Rua da Beleza, 123, Lisboa. Para agendar, o cliente deve fornecer Nome Completo, Data/Hora desejada e o Serviço."
+    "id": "clinic_policy",
+    "texto": "Aura Esthetics is open Monday to Friday, from 09:00 to 19:00. The address is Beauty Street, 123, Lisbon. To book an appointment, the client must provide their Full Name, Desired Date/Time, and the Service."
   }
 ]
